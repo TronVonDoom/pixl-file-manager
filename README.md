@@ -6,21 +6,24 @@ directly to the device. Your files never go to the internet.
 
 ## Start it
 
-1. Double-click **`Start Pixl File Manager.bat`**. A small console window opens, and so
-   does the app (in Chrome if it's installed, otherwise Edge). Keep the console window
-   open while you use the app. Closing it stops the app.
-2. On the Pixl.js, open **BLE File Transfer** from the main menu.
-3. Click **Connect device** and pick **Pixl.js** from the list.
+**Open <https://tronvondoom.github.io/pixl-file-manager/> in Chrome or Edge**, on a
+computer or an Android phone. Then:
 
-Click **Install app** in the top bar to get a desktop app with its own icon. The app keeps
-a copy of itself, so after installing it opens even when the launcher isn't running.
+1. On the Pixl.js, open **BLE File Transfer** from the main menu.
+2. Click **Connect device** and pick **Pixl.js** from the list.
 
-Want to look around first? Click **Try the demo**. It runs an emulated device in memory.
+Click **Install app** in the top bar to get an app with its own icon that also opens
+offline. Want to look around first? Click **Try the demo**. It runs an emulated device in
+memory.
 
-> Why a launcher? Browsers only allow Bluetooth on `https://` pages or on
-> `http://localhost`. The launcher serves this folder on `http://localhost:8642`, and only
-> this computer can reach it. Firefox and Safari don't support Web Bluetooth, so use
-> Chrome or Edge.
+The page runs entirely in your browser. Files go straight between the browser and the
+device; the website only delivers the app itself.
+
+**Running it from this folder instead:** double-click **`Start Pixl File Manager.bat`**.
+It serves the app on `http://localhost:8642`, which only this computer can reach, and
+opens it in Chrome or Edge. Keep the console window open while you use it. Browsers only
+allow Bluetooth on `https://` pages or `localhost`, which is why a plain double-click on
+`index.html` isn't enough. Firefox and Safari don't support Web Bluetooth.
 
 ## What it does
 
