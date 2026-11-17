@@ -177,7 +177,11 @@
       opts = opts || {};
       this.latency = opts.latency != null ? opts.latency : 12;
       this.faults = opts.faults || 0;
-      this.fs = new MockFS();
+      this.rng = opts.rng || Math.random;
+      // shared across reconnects within the page (and with the demo bootloader)
+      const st = (Pixl.mockState = Pixl.mockState || { version: '2.13.0-demo', inDfu: false });
+      this.state = opts.fresh ? { version: '2.13.0-demo', inDfu: false } : st;
+      this.fs = opts.fresh ? new MockFS() : st.fs || (st.fs = new MockFS());
       this._connected = false;
       this.onData = null;
       this.onDisconnect = null;
@@ -199,6 +203,7 @@
     async pick() {}
     async connect() {
       await new Promise((r) => setTimeout(r, 350));
+      if (this.state.inDfu) throw new Error('GATT connection failed: the demo device is in firmware update mode');
       this.userClosed = false;
       this._connected = true;
     }
@@ -248,7 +253,7 @@
       const next = () => {
         if (!this._connected || this.stream !== token || i >= frames.length) return;
         const f = frames[i++];
-        if (!(this.faults && Math.random() < this.faults)) {
+        if (!(this.faults && this.rng() < this.faults)) {
           if (this.onData) this.onData(f);
         }
         setTimeout(next, Math.max(2, this.latency / 2));
@@ -269,8 +274,17 @@
 
       switch (cmd) {
         case 0x01: {
-          const w = new Pixl.Writer().str('2.13.0-demo').str('DE:M0:00:00:00:01');
+          const w = new Pixl.Writer().str(this.state.version).str('DE:M0:00:00:00:01');
           return this._reply(cmd, 0, w.done());
+        }
+        case 0x02: {
+          // enter update mode: answer, then "reboot" into the bootloader
+          this._reply(cmd, 0);
+          setTimeout(() => {
+            this.state.inDfu = true;
+            this._drop();
+          }, 120);
+          return;
         }
         case 0x10: {
           const used = fs.used();

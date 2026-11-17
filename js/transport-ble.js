@@ -91,6 +91,15 @@
       return this.tx.writeValue(u8);
     }
 
+    /** Write without waiting for an ATT acknowledgement (used by fast transfers). */
+    writeFast(u8) {
+      if (!this.tx) return Promise.reject(new Error('GATT Server is disconnected'));
+      if (this.tx.writeValueWithoutResponse && this.tx.properties && this.tx.properties.writeWithoutResponse) {
+        return this.tx.writeValueWithoutResponse(u8);
+      }
+      return this.write(u8);
+    }
+
     _onNotify(e) {
       const v = e.target.value;
       const u8 = new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength));

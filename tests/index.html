@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pixl File Manager Tests</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --fg: #171a21;
+        --muted: #6b7385;
+        --ok: #15904d;
+        --bad: #d1242f;
+        --card: #fff;
+        --border: #e2e5eb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0e1015;
+          --fg: #e8eaf0;
+          --muted: #8d95a7;
+          --ok: #4ad386;
+          --bad: #ff6b6b;
+          --card: #151820;
+          --border: #272c38;
+        }
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 'Segoe UI', system-ui, sans-serif;
+        padding: 24px 16px;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+      }
+      #summary {
+        color: var(--muted);
+        margin-bottom: 16px;
+      }
+      ol {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+      }
+      li {
+        padding: 8px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      li:last-child {
+        border-bottom: none;
+      }
+      .ok::before {
+        content: '✓ ';
+        color: var(--ok);
+        font-weight: 700;
+      }
+      .bad::before {
+        content: '✗ ';
+        color: var(--bad);
+        font-weight: 700;
+      }
+      .ms {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      pre {
+        color: var(--bad);
+        font-size: 12px;
+        white-space: pre-wrap;
+        margin: 6px 0 0;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Pixl File Manager tests</h1>
+      <div id="summary">Running…</div>
+      <ol id="out"></ol>
+    </main>
+    <script src="../js/protocol.js"></script>
+    <script src="../js/mock-device.js"></script>
+    <script src="../js/zip.js"></script>
+    <script src="../js/unzip.js"></script>
+    <script src="../js/amiibo.js"></script>
+    <script src="../js/dfu.js"></script>
+    <script src="../js/mock-dfu.js"></script>
+    <script src="../js/sync.js"></script>
+    <script src="harness.js"></script>
+    <script src="suite.js"></script>
+    <script>
+      const out = document.getElementById('out');
+      T.run((r) => {
+        const li = document.createElement('li');
+        li.className = r.ok ? 'ok' : 'bad';
+        li.textContent = r.name + ' ';
+        const ms = document.createElement('span');
+        ms.className = 'ms';
+        ms.textContent = r.ms + ' ms';
+        li.appendChild(ms);
+        if (!r.ok) {
+          const pre = document.createElement('pre');
+          pre.textContent = r.error;
+          li.appendChild(pre);
+        }
+        out.appendChild(li);
+      }).then((s) => {
+        document.getElementById('summary').textContent = `${s.failed ? s.failed + ' failed' : 'All passed'} · ${s.passed}/${s.total} in ${(s.ms / 1000).toFixed(1)} s`;
+        window.__testResult = s;
+      });
+    </script>
+  </body>
+</html>

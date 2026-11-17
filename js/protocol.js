@@ -331,8 +331,15 @@
       this.t = transport;
       this.log = opts.log || function () {};
       this.verbose = false;
-      this.timeout = opts.timeout || 5000;
+      this.timeout = opts.timeout || 5000; // replies to normal requests
+      this.ioTimeout = opts.ioTimeout || 3000; // gaps while streaming file data
+      this.quietMs = opts.quietMs || 350; // silence to wait for after a lost packet
       this.writeChunk = PAYLOAD_MAX - 1;
+      // Fast writes: send `fastWindow` frames, only the last one asks for a reply.
+      // The firmware writes frames with the "more" bit without answering.
+      this.fastWrites = false;
+      this.fastWindow = 8;
+      this._fastOk = true;
       this._lock = Promise.resolve();
       this._pending = null;
       this._needQuiet = false;
@@ -360,17 +367,18 @@
       const start = performance.now();
       while (performance.now() - start < 3000) {
         const now = performance.now();
-        if (now - start >= 350 && now - this._lastRx >= 350) break;
+        if (now - start >= this.quietMs && now - this._lastRx >= this.quietMs) break;
         await sleep(60);
       }
       this._needQuiet = false;
     }
 
-    async _send(frame) {
+    async _send(frame, noReply) {
       for (let attempt = 0; ; attempt++) {
         try {
           if (this.verbose) this.log('debug', `→ ${CMD_NAMES[frame[0]] || frame[0]} ${hex(frame)}`);
-          await this.t.write(frame);
+          if (noReply && this.t.writeFast) await this.t.writeFast(frame);
+          else await this.t.write(frame);
           return;
         } catch (e) {
           if (!this.t.connected) throw new PixlError('Device disconnected', { code: 'DISCONNECTED', retryable: true, cause: e });
@@ -609,7 +617,7 @@
           let res = null;
           try {
             res = await this._req(CMD.FILE_READ, Uint8Array.of(fid), {
-              timeout: 3000,
+              timeout: this.ioTimeout,
               label: `Read ${name}`,
               onChunk: (seq, payload, last) => {
                 if (last) lastSeq = seq;
@@ -685,17 +693,46 @@
         let wrote = false;
         let stalls = 0;
         let lastResumeAt = -1;
+        let fastFails = 0;
+        let seq = 0;
+        const frame = (start, n) => {
+          const payload = new Uint8Array(1 + n);
+          payload[0] = fid;
+          payload.set(data.subarray(start, start + n), 1);
+          return payload;
+        };
         try {
           let off = 0;
           while (off < data.length) {
             if (opts.signal && opts.signal.aborted) throw abortError();
-            const n = Math.min(this.writeChunk, data.length - off);
-            const payload = new Uint8Array(1 + n);
-            payload[0] = fid;
-            payload.set(data.subarray(off, off + n), 1);
+            const fast = this.fastWrites && this._fastOk;
+            // one batch: `count` frames, only the last one is answered
+            const sizes = [];
+            let end = off;
+            for (let k = 0; k < (fast ? this.fastWindow : 1) && end < data.length; k++) {
+              const n = Math.min(this.writeChunk, data.length - end);
+              sizes.push(n);
+              end += n;
+            }
             try {
-              this._check(await this._req(CMD.FILE_WRITE, payload, { label: `Write ${name}`, timeout: 3000 }), `Write ${name}`);
-              off += n;
+              let pos = off;
+              for (let k = 0; k < sizes.length - 1; k++) {
+                const f = new Uint8Array(HEADER_LEN + 1 + sizes[k]);
+                const c = 0x8000 | (seq++ & 0x7fff);
+                f[0] = CMD.FILE_WRITE;
+                f[2] = c & 0xff;
+                f[3] = c >> 8;
+                f.set(frame(pos, sizes[k]), HEADER_LEN);
+                await this._send(f, true);
+                pos += sizes[k];
+              }
+              const last = sizes[sizes.length - 1];
+              this._check(
+                await this._req(CMD.FILE_WRITE, frame(pos, last), { label: `Write ${name}`, timeout: this.ioTimeout + (sizes.length - 1) * 150, chunk: seq++ & 0x7fff }),
+                `Write ${name}`
+              );
+              off = end;
+              fastFails = 0;
               if (opts.onProgress) opts.onProgress(off);
               continue;
             } catch (e) {
@@ -707,13 +744,20 @@
                 this.writeChunk = SAFE_WRITE_DATA;
                 this.log('warn', 'Large Bluetooth packets were rejected; switching to small packets (slower but compatible).');
               }
+              if (fast && ++fastFails >= 2) {
+                this._fastOk = false;
+                this.log('warn', 'Fast transfers turned off for this connection: the device couldn’t keep up.');
+              }
               this.log('warn', `Write of ${name} interrupted at ${off} bytes (${e.message}); resuming`);
             }
             // Resume: commit, measure, reopen for append.
             await this._reqIdempotent(CMD.FILE_CLOSE, Uint8Array.of(fid)).catch(() => {});
             const size = await this._sizeOnDevice(p);
-            if (size !== off && size !== off + n) {
-              throw new PixlError(`Couldn't resume ${name} (device has ${size} bytes, expected ${off})`, { code: 'LOST', retryable: true });
+            // Frames land in order, so the device holds a whole number of this batch's frames.
+            let ok = size === off;
+            for (let k = 0, acc = off; k < sizes.length && !ok; k++) ok = size === (acc += sizes[k]);
+            if (!ok) {
+              throw new PixlError(`Couldn't resume ${name} (device has ${size} bytes, expected ${off}–${end})`, { code: 'LOST', retryable: true });
             }
             const reopen = this._check(
               await this._reqIdempotent(CMD.FILE_OPEN, new Writer().str(p).u32(MODE_APPEND | MODE_WRITEONLY).done()),

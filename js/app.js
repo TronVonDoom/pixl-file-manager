@@ -1316,8 +1316,20 @@
   function setProgress(job, done, span) {
     job.done = done;
     if (span != null) job.span = span;
+    // throughput (bytes/s), smoothed; only meaningful for byte-based jobs
+    const now = performance.now();
+    if (job._rt == null || done < job._rd) {
+      job._rt = now;
+      job._rd = done;
+    } else if (now - job._rt > 250) {
+      const inst = ((done - job._rd) * 1000) / (now - job._rt);
+      job.rate = job.rate ? job.rate * 0.6 + inst * 0.4 : inst;
+      job._rt = now;
+      job._rd = done;
+    }
     scheduleJobRender(job);
   }
+  const RATE_KINDS = { upload: 1, download: 1, zip: 1, copy: 1, sync: 1 };
 
   const jobRenderQueue = new Set();
   let jobRenderQueued = false;
@@ -1338,6 +1350,7 @@
     const ic = j.status === 'done' ? 'check' : j.status === 'error' ? 'alert' : j.icon || 'file';
     let size = j.total ? fmtSize(j.total) : '';
     if (j.status === 'running' && j.span) size = `${Math.floor(pct)}%${size ? ' · ' + size : ''}`;
+    if (j.status === 'running' && RATE_KINDS[j.kind] && j.rate > 0) size += ` · ${fmtSize(Math.round(j.rate))}/s`;
     let sub;
     if (j.status === 'error') sub = j.error;
     else if (j.status === 'canceled') sub = 'Canceled';
@@ -2620,6 +2633,7 @@
 
   function applyClientSettings() {
     if (S.client) {
+      if (S.client.fastWrites !== !!settings.fast) S.client._fastOk = true;
       S.client.fastWrites = !!settings.fast;
       S.client.verbose = el.verboseChk.checked;
     }

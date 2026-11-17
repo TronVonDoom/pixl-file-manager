@@ -66,6 +66,7 @@ $mime = @{
     '.png'  = 'image/png'
     '.ico'  = 'image/x-icon'
     '.json' = 'application/json'
+    '.webmanifest' = 'application/manifest+json'
     '.md'   = 'text/plain; charset=utf-8'
 }
 
