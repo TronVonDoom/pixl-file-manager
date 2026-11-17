@@ -1,8 +1,8 @@
 # Pixl File Manager
 
-A reliable file browser for the **Pixl.js** amiibo emulator over Bluetooth, built as a
+A reliable file manager for the **Pixl.js** amiibo emulator over Bluetooth, built as a
 replacement for the flaky pixl.amiibo.xyz page. It runs in your own browser and talks
-directly to the device. Nothing goes to the internet.
+directly to the device. Your files never go to the internet.
 
 ## Start it
 
@@ -11,6 +11,9 @@ directly to the device. Nothing goes to the internet.
    open while you use the app. Closing it stops the app.
 2. On the Pixl.js, open **BLE File Transfer** from the main menu.
 3. Click **Connect device** and pick **Pixl.js** from the list.
+
+Click **Install app** in the top bar to get a desktop app with its own icon. The app keeps
+a copy of itself, so after installing it opens even when the launcher isn't running.
 
 Want to look around first? Click **Try the demo**. It runs an emulated device in memory.
 
@@ -23,15 +26,46 @@ Want to look around first? Click **Try the demo**. It runs an emulated device in
 
 | | |
 |---|---|
-| **Browse** | Drives, folders, breadcrumbs, back/forward, sorting, a filter box, and a free-space meter |
-| **Upload** | Drag files *or whole folders* onto the window, or onto a folder row, or use **Upload ▾** |
-| **Download** | One file downloads as-is. Several files or folders download as one `.zip`. Use **Back up whole drive** (the drive's ⋯ menu) to save everything at once |
-| **Copy / move** | Copy, Cut, Paste (Ctrl+C / X / V), or drag rows onto a folder or breadcrumb (hold Ctrl to copy). Works across folders and drives |
+| **Amiibo names & pictures** | Every amiibo shows its name, series and picture. The **picture grid** (top right) lets you browse visually, and the filter box searches by character, series or game |
+| **Browse** | Drives, folders, breadcrumbs, back/forward, sorting (including by amiibo name), and a free-space meter |
+| **Upload** | Drag files *or whole folders* onto the window or onto a folder, or use **Upload ▾** |
+| **Smart uploads** | Flipper Zero `.nfc` and Proxmark `.eml` dumps convert to `.bin` automatically, files the Pixl.js can't load are flagged, and you can sort amiibo into **series folders** or **rename them to the figure's name**. Existing files are never overwritten |
+| **Download & backup** | One file downloads as-is. Several files or folders download as one `.zip`. Use **Back up whole drive** in the drive's ⋯ menu to save everything |
+| **Restore** | **Upload ▾ → Restore from ZIP backup**, or drop a `.zip` onto the window |
+| **Sync with a PC folder** | **Sync** compares a Pixl.js folder with a folder on your computer (by content, since amiibo files are all the same size), shows exactly what will change, then copies only the differences, in one direction or both |
+| **Duplicates** | **Find duplicate amiibo** (drive menu or right-click). Identical copies are pre-selected for deletion; different saves of the same figure are not |
+| **Copy / move** | Copy, Cut, Paste (Ctrl+C / X / V), or drag rows onto a folder or breadcrumb (hold Ctrl to copy) |
 | **Organize** | New folder, rename (F2), delete (Del, folders included), notes / hidden / read-only (Properties) |
+| **Firmware update** | **Update firmware…** in the sidebar installs a `pixjs_ota_vXXX.zip` package over Bluetooth |
 | **Format** | In the drive's ⋯ menu, with a type-to-confirm step |
 
 Keyboard: arrows, Shift/Ctrl-click selection, Enter opens, Backspace goes up, F5
 refreshes, Ctrl+A selects all, Ctrl+F filters.
+
+**Settings** (gear icon):
+- Amiibo names and pictures (on or off).
+- Upload review.
+- Verify uploads.
+- **Fast transfers (experimental):** sends several packets per confirmation. Try it with
+  big files, and compare the speed shown in the Transfers panel. It switches itself off if
+  the device can't keep up.
+
+### About amiibo names
+
+Names and pictures come from the open
+[AmiiboAPI](https://github.com/N3evin/AmiiboAPI) database on GitHub. The app downloads it
+once and keeps a copy. The only requests are for that public file and the pictures;
+nothing about your files is sent. To learn which amiibo a file is, the app reads it once
+(540 bytes) when the device is idle, then remembers the answer on this computer.
+
+### About firmware updates
+
+Pixl.js uses Nordic's standard secure bootloader, the same one the official update page
+and nRF Connect talk to. Use the **OTA package** (`pixjs_ota_vXXX.zip`, inside the firmware
+download) that matches your screen, **LCD** or **OLED**. If an update is interrupted, the
+old firmware keeps working. To retry, open **Settings → Firmware Update** on the device. If
+the screen is blank because the wrong package went on, the button sequence in the official
+docs puts the device back into update mode.
 
 ## Why it's more reliable than the stock page
 
@@ -41,10 +75,12 @@ app's protocol code, then fixed the problems I found in both:
 - **No more frozen queue.** The stock page waits forever for every reply, so one lost
   Bluetooth packet hangs everything until you reload. Here every request has a timeout
   and is retried.
-- **Lost packets are caught.** Chunk sequence numbers are checked. A gap is treated as an
-  error and retried, so it can't quietly produce a corrupt file.
+- **Lost packets are caught.** Chunk sequence numbers are checked, so a gap can't quietly
+  produce a corrupt file.
 - **Resumable uploads.** If a write is interrupted, the app commits what the device has,
   reads back how many bytes actually landed, and continues from there.
+- **Gap-filling downloads.** The firmware can't seek, so a lost packet would mean starting
+  over. Instead, the app re-reads and fills in only the missing pieces.
 - **Verified uploads** (on by default). Every uploaded or copied file is read back and
   compared byte for byte.
 - **Auto-reconnect.** If the link drops, the app reconnects on its own and pending
@@ -57,8 +93,6 @@ app's protocol code, then fixed the problems I found in both:
 - **Correct free space.** The stock page shows the firmware's *free* bytes as *used*.
 - **Names that fit.** The device limits names to 47 bytes and paths to 63 bytes. The app
   checks this up front and offers to shorten names, rather than failing halfway through.
-- File operations are serialized under one lock, because the firmware has only one
-  open-file slot.
 
 ## Troubleshooting
 
@@ -71,20 +105,32 @@ app's protocol code, then fixed the problems I found in both:
 - **Something failed.** Open the **Activity log** tab at the bottom. **Show packets** adds
   raw protocol traces, and **Copy** puts the log on your clipboard.
 
-## Files
+## For developers
 
 ```
 index.html                 the app
 css/app.css                styles (light & dark)
-js/protocol.js             Pixl.js BLE file protocol client (framing, retries, resume)
+js/protocol.js             Pixl.js BLE file protocol client (framing, retries, resume, fast mode)
 js/transport-ble.js        Web Bluetooth (Nordic UART Service) transport
-js/mock-device.js          in-memory firmware emulator used by the demo
-js/zip.js                  ZIP writer for multi-file downloads
+js/amiibo.js               amiibo IDs, AmiiboAPI lookups, .nfc/.eml conversion
+js/zip.js / js/unzip.js    ZIP writer and reader
+js/sync.js                 PC folder sync (File System Access API)
+js/dfu.js                  Nordic Secure DFU client (firmware updates)
+js/firmware-ui.js          firmware update screens
+js/mock-device.js          firmware emulator for the demo and tests
+js/mock-dfu.js             bootloader emulator for the demo and tests
 js/app.js                  user interface
-server.ps1                 tiny localhost web server
-Start Pixl File Manager.bat  launcher
+sw.js, manifest.webmanifest, icons/   installable app / offline support
+tests/                     automated tests
+server.ps1, Start Pixl File Manager.bat   local launcher
 ```
 
-Developer URL options: `?demo` auto-starts the demo, `?demo&faults=0.05` makes the
-emulator drop 5% of replies (to test recovery), and `&latency=30` sets a per-packet delay
-in ms.
+**Tests:** run `node tests/run-node.js`, or open `tests/index.html` through the launcher.
+They exercise the protocol against the firmware emulator, including deliberately lost
+packets, dropped connections, fast mode, the amiibo tools, ZIP, firmware updates and
+sync logic.
+
+**URL options:**
+- `?demo` auto-starts the demo.
+- `?demo&faults=0.05` makes the emulator drop 5% of replies, to test recovery.
+- `&latency=30` sets the per-packet delay in milliseconds.

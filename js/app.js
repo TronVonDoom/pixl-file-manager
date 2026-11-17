@@ -1434,10 +1434,12 @@
     opts = opts || {};
     if (S.conn !== 'on' || !destDir) return;
     let files = batch.files.filter((f) => !JUNK.test(PP.basename(f.rel)));
+    let mergeTop = new Set(); // series folders created by "sort by series": merge silently
     if (opts.review !== false && files.length) {
       const reviewed = await reviewAmiiboUploads(files, destDir);
       if (!reviewed) return;
-      files = reviewed;
+      files = reviewed.files;
+      mergeTop = reviewed.mergeTop;
     }
     const dirSet = new Set((batch.dirs || []).filter(Boolean));
     files.forEach((f) => {
@@ -1460,7 +1462,7 @@
     });
 
     let policy = 'replace';
-    const conflicts = Array.from(tops.keys()).filter((n) => exMap.has(n));
+    const conflicts = Array.from(tops.keys()).filter((n) => exMap.has(n) && !(mergeTop.has(n) && exMap.get(n).isDir));
     if (conflicts.length) {
       policy = await askConflict(conflicts, destDir);
       if (!policy) return;
@@ -1471,6 +1473,10 @@
     const topMap = new Map();
     tops.forEach((info, name) => {
       const ex = exMap.get(name);
+      if (ex && mergeTop.has(name) && ex.isDir && info.isDir) {
+        topTaken.add(name);
+        return topMap.set(name, name);
+      }
       if (ex) {
         if (policy === 'skip') return topMap.set(name, null);
         if (policy === 'rename' || ex.isDir !== info.isDir) {
@@ -1633,7 +1639,7 @@
       const a = AM.analyze(name, data, { amiiboContext });
       rows.push({ f, a, info: a.id ? db.lookup(a.id) : null });
     }
-    if (!rows.length) return files;
+    if (!rows.length) return { files, mergeTop: new Set() };
 
     const amiibos = rows.filter((r) => r.a.kind === 'amiibo');
     const converted = rows.filter((r) => r.a.converted);
@@ -1658,7 +1664,7 @@
       if (takenByFolder.has(folderRel)) return takenByFolder.get(folderRel);
       const set = new Set();
       takenByFolder.set(folderRel, set);
-      if (choice.rename) {
+      if (choice.rename || choice.sort) {
         const devDir = folderRel ? PP.join(destDir, folderRel) : destDir;
         const items = devDir === S.cwd ? S.items : await S.client.listDir(devDir).catch(() => []);
         items.forEach((i) => set.add(i.name));
@@ -1667,6 +1673,7 @@
     };
 
     const out = passthrough.slice();
+    const mergeTop = new Set();
     for (const r of rows) {
       if (r.a.warning && choice.skipBad) {
         log('warn', `Skipped ${PP.basename(r.f.rel)}: ${r.a.warning}`);
@@ -1676,7 +1683,11 @@
       let folder = segs.slice(0, -1).join('/');
       let name = r.a.name;
       if (r.a.kind === 'amiibo' && r.info) {
-        if (choice.sort) folder = [folder, cleanName(r.info.series || 'Other')].filter(Boolean).join('/');
+        if (choice.sort) {
+          const series = cleanName(r.info.series || 'Other');
+          if (!folder) mergeTop.add(series);
+          folder = [folder, series].filter(Boolean).join('/');
+        }
         if (choice.rename && r.info.name) name = cleanName(r.info.name) + '.bin';
       }
       if (choice.rename || choice.sort) {
@@ -1688,14 +1699,14 @@
       const changed = name !== PP.basename(r.f.rel) || r.a.converted;
       out.push({ file: changed ? new File([r.a.data], name) : r.f.file, rel: folder ? `${folder}/${name}` : name });
     }
-    return out;
+    return { files: out, mergeTop };
   }
 
   function askReview(rows, amiibos, converted, warned, destDir, saved) {
     let sortEl, renameEl, skipEl, dontEl;
     const dbReady = db.ready;
     const summary = [
-      amiibos.length ? plural(amiibos.length, 'amiibo') : '',
+      amiibos.length ? plural(amiibos.length, 'amiibo', 'amiibo') : '',
       converted.length ? `${converted.length} converted` : '',
       warned.length ? `${plural(warned.length, 'problem')}` : '',
     ]
@@ -1864,7 +1875,7 @@
           await readOne(f);
         }
         job.result = dupes.map(([id, list]) => ({ id, info: db.lookup(id), files: list.map((f) => Object.assign(f, { crc: crcs.get(f.path) })) }));
-        job.doneText = dupes.length ? `${plural(dupes.length, 'amiibo')} found more than once` : 'No duplicates found';
+        job.doneText = dupes.length ? `${plural(dupes.length, 'amiibo', 'amiibo')} found more than once` : 'No duplicates found';
       },
       after: async function () {
         showDuplicates(this.result || [], rootDir);
@@ -1895,7 +1906,7 @@
       .join('');
     let picked = [];
     const res = await modal({
-      title: `${plural(groups.length, 'amiibo')} found more than once`,
+      title: `${plural(groups.length, 'amiibo', 'amiibo')} found more than once`,
       icon: 'dupe',
       wide: true,
       body: `<p class="muted-line">Identical copies are pre-selected. Files that are the same amiibo but differ (for example separate saves) are not.</p><div class="dup-list">${html}</div>`,
