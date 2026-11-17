@@ -45,8 +45,60 @@
   function fmtTime(d) {
     return d.toLocaleTimeString([], { hour12: false });
   }
+  /* ----------------------------------------------------------- amiibo data */
+
+  const AM = P.amiibo;
+  const settings = Object.assign({ online: true, view: 'list', reviewUploads: true, fast: false }, store.get('settings', {}));
+  function saveSettings() {
+    store.set('settings', settings);
+  }
+  const db = new AM.AmiiboDb({ log: (level, msg) => log(level, msg) });
+
+  // A file's amiibo ID is learned by reading it once; remembered per device + path + size.
+  const idCache = {
+    map: store.get('idcache', {}),
+    timer: 0,
+    key(path, size) {
+      return `${S.device.address || S.device.name || 'device'}|${path}|${size}`;
+    },
+    get(path, size) {
+      return this.map[this.key(path, size)];
+    },
+    set(path, size, id) {
+      this.map[this.key(path, size)] = id || '';
+      this.save();
+    },
+    move(from, to, size) {
+      const v = this.get(from, size);
+      if (v === undefined) return;
+      delete this.map[this.key(from, size)];
+      this.set(to, size, v);
+    },
+    save() {
+      clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        const keys = Object.keys(this.map);
+        if (keys.length > 5000) keys.slice(0, keys.length - 5000).forEach((k) => delete this.map[k]);
+        store.set('idcache', this.map);
+      }, 600);
+    },
+  };
+
+  function isAmiiboCandidate(it) {
+    return !it.isDir && AM.AMIIBO_SIZES.indexOf(it.size) >= 0;
+  }
+  function amiiboIdOf(it, dir) {
+    if (it.isDir) return null;
+    return AM.idFromMeta(it.meta) || (isAmiiboCandidate(it) && idCache.get(PP.join(dir || S.cwd, it.name), it.size)) || null;
+  }
+  function amiiboInfo(it, dir) {
+    const id = amiiboIdOf(it, dir);
+    return id ? db.lookup(id) : null;
+  }
   function isAmiibo(it) {
-    return !it.isDir && (!!it.meta.amiibo || (/\.bin$/i.test(it.name) && (it.size === 540 || it.size === 532 || it.size === 572)));
+    if (it.isDir) return false;
+    if (amiiboIdOf(it)) return true;
+    return isAmiiboCandidate(it) && /\.bin$/i.test(it.name) && idCache.get(PP.join(S.cwd, it.name), it.size) !== '';
   }
   function kindOf(it) {
     return it.isDir ? 'folder' : isAmiibo(it) ? 'tag' : 'file';
@@ -59,7 +111,8 @@
     'backBtn', 'fwdBtn', 'upBtn', 'refreshBtn', 'crumbs', 'filter', 'mobileDrives', 'actions', 'uploadMenuBtn', 'listWrap',
     'listHead', 'checkAll', 'list', 'listState', 'statusLeft', 'clipChip', 'statusRight', 'panel', 'xferBadge', 'logBadge',
     'xferSummary', 'verifyChk', 'clearDone', 'verboseChk', 'copyLog', 'clearLog', 'panelToggle', 'xferList', 'logList',
-    'menu', 'dropOverlay', 'dropTarget', 'toasts', 'dlg', 'fileInput', 'folderInput',
+    'menu', 'dropOverlay', 'dropTarget', 'toasts', 'dlg', 'fileInput', 'folderInput', 'zipInput', 'installBtn', 'settingsBtn',
+    'sideFirmware', 'viewSeg', 'welcomeFirmware',
   ].forEach((id) => (el[id] = document.getElementById(id)));
 
   /* ------------------------------------------------------------------ state */
@@ -186,6 +239,7 @@
         ev.preventDefault();
         finish(null);
       };
+      d.classList.toggle('wide', !!opts.wide);
       d.showModal();
       if (opts.init) opts.init(d);
       else {
@@ -394,7 +448,7 @@
     S.transport = transport;
     S.demo = demo;
     S.client = new P.PixlClient(transport, { log });
-    S.client.verbose = el.verboseChk.checked;
+    applyClientSettings();
     const inner = transport.onDisconnect;
     transport.onDisconnect = () => {
       if (inner) inner();
@@ -628,6 +682,8 @@
     showMenu(x, y, [
       { label: 'Open', icon: 'folder', act: () => navigate(PP.root(label)), disabled: !d.ok },
       { label: 'Back up whole drive (ZIP)', icon: 'zip', act: () => backupDrive(label), disabled: !d.ok },
+      { label: 'Restore a ZIP backup here…', icon: 'archive-in', act: () => navigate(PP.root(label)).then(() => el.zipInput.click()), disabled: !d.ok },
+      { label: 'Find duplicate amiibo', icon: 'dupe', act: () => findDuplicates(PP.root(label)), disabled: !d.ok },
       { label: 'Refresh', icon: 'refresh', act: () => loadDrives() },
       '-',
       { label: 'Format drive…', icon: 'erase', danger: true, act: () => formatDrive(label) },
@@ -678,6 +734,7 @@
         if (!names.has(n)) S.sel.delete(n);
       });
       if (S.focus && !names.has(S.focus)) S.focus = null;
+      scheduleIdentify();
     } catch (e) {
       if (token !== S.listToken) return;
       if (e.code === 'STATUS' && !PP.isRoot(dir)) {
@@ -742,34 +799,83 @@
 
   function visibleItems() {
     const f = S.filter.trim().toLowerCase();
-    const items = S.items.filter((it) => !f || it.name.toLowerCase().includes(f) || (it.meta.notes || '').toLowerCase().includes(f));
+    const items = S.items.filter((it) => {
+      if (!f) return true;
+      if (it.name.toLowerCase().includes(f) || (it.meta.notes || '').toLowerCase().includes(f)) return true;
+      const info = amiiboInfo(it);
+      return !!info && [info.name, info.series, info.game, info.character].some((v) => v && v.toLowerCase().includes(f));
+    });
     const key = S.sort.key;
     const dir = S.sort.dir;
+    const amName = (it) => {
+      const info = amiiboInfo(it);
+      return (info && info.name) || '￿';
+    };
     items.sort((a, b) => {
       if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
       let r = 0;
       if (key === 'size') r = a.size - b.size;
       else if (key === 'notes') r = collator.compare(a.meta.notes || '', b.meta.notes || '');
+      else if (key === 'amiibo') r = collator.compare(amName(a), amName(b));
       if (r === 0) r = collator.compare(a.name, b.name);
       return r * dir;
     });
     return items;
   }
 
-  function rowHtml(it, cutSet) {
+  function artHtml(it, info, kind, cls) {
+    if (info && settings.online) {
+      return `<span class="fi fi-img ${cls || ''}"><img src="${esc(info.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"
+        onerror="this.parentNode.classList.add('noimg');this.remove()">${icon('tag')}</span>`;
+    }
+    return `<span class="fi fi-${kind} ${cls || ''}">${icon(kind)}</span>`;
+  }
+
+  function rowHtml(it, cutSet, dupes) {
     const sel = S.sel.has(it.name);
     const kind = kindOf(it);
     const full = PP.join(S.cwd, it.name);
-    const id = P.amiiboId(it.meta);
-    const tip = [it.name, it.isDir ? 'Folder' : fmtSize(it.size), id ? 'Amiibo ID ' + id : '', it.meta.notes].filter(Boolean).join('\n');
+    const id = amiiboIdOf(it);
+    const info = id ? db.lookup(id) : null;
+    const pending = !id && isAmiiboCandidate(it) && idCache.get(full, it.size) === undefined;
+    const tip = [
+      it.name,
+      it.isDir ? 'Folder' : fmtSize(it.size),
+      info ? [info.name, info.series && `${info.series} series`, info.game].filter(Boolean).join(' · ') : '',
+      id ? 'Amiibo ID ' + AM.prettyId(id) : '',
+      it.meta.notes,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const dupeN = id && dupes ? dupes.get(id) : 0;
     const badges =
+      (dupeN > 1 ? `<span class="dupe" title="${dupeN} files in this folder are this amiibo">×${dupeN}</span>` : '') +
       (it.meta.hidden ? `<span class="badge-ic" title="Hidden on the device">${icon('eye-off')}</span>` : '') +
       (it.meta.readonly ? `<span class="badge-ic" title="Read-only">${icon('lock')}</span>` : '');
-    return `<div class="row ${sel ? 'sel' : ''} ${it.isDir ? 'is-dir' : ''} ${it.meta.hidden ? 'hidden-file' : ''} ${S.focus === it.name ? 'focus' : ''} ${
+    const cls = `row ${sel ? 'sel' : ''} ${it.isDir ? 'is-dir' : ''} ${it.meta.hidden ? 'hidden-file' : ''} ${S.focus === it.name ? 'focus' : ''} ${
       cutSet && cutSet.has(full) ? 'cut-pending' : ''
-    }" data-name="${esc(it.name)}" draggable="true" role="row" aria-selected="${sel}" title="${esc(tip)}">
-      <span class="c-check"><input type="checkbox" tabindex="-1" ${sel ? 'checked' : ''} aria-label="Select ${esc(it.name)}"></span>
-      <span class="c-name"><span class="fi fi-${kind}">${icon(kind)}</span><span class="nm">${esc(it.name)}</span>${badges}</span>
+    }`;
+    const check = `<span class="c-check"><input type="checkbox" tabindex="-1" ${sel ? 'checked' : ''} aria-label="Select ${esc(it.name)}"></span>`;
+    if (settings.view === 'grid') {
+      const title = (info && info.name) || it.name;
+      const sub = info ? it.name : it.isDir ? 'Folder' : pending ? 'Identifying…' : fmtSize(it.size);
+      return `<div class="${cls} card" data-name="${esc(it.name)}" draggable="true" role="row" aria-selected="${sel}" title="${esc(tip)}">
+        ${check}
+        <div class="card-art">${artHtml(it, info, kind, 'big')}</div>
+        <div class="card-title">${esc(title)}</div>
+        <div class="card-sub">${esc(sub)}</div>
+        <div class="card-badges">${badges}</div>
+      </div>`;
+    }
+    const amCell = info
+      ? `<span class="am-name">${esc(info.name || 'Unknown amiibo')}</span>${info.series ? `<span class="am-sub">${esc(info.series)}</span>` : ''}`
+      : pending
+        ? '<span class="am-sub">identifying…</span>'
+        : '';
+    return `<div class="${cls}" data-name="${esc(it.name)}" draggable="true" role="row" aria-selected="${sel}" title="${esc(tip)}">
+      ${check}
+      <span class="c-name">${artHtml(it, info, kind)}<span class="nm">${esc(it.name)}</span>${badges}</span>
+      <span class="c-amiibo">${amCell}</span>
       <span class="c-size">${it.isDir ? '' : fmtSize(it.size)}</span>
       <span class="c-notes">${esc(it.meta.notes || '')}</span>
     </div>`;
@@ -778,7 +884,15 @@
   function renderList() {
     const items = (S.view = visibleItems());
     const cutSet = S.clipboard && S.clipboard.mode === 'cut' ? new Set(S.clipboard.items.map((i) => i.path)) : null;
-    el.list.innerHTML = items.map((it) => rowHtml(it, cutSet)).join('');
+    const dupes = new Map();
+    S.items.forEach((it) => {
+      const id = amiiboIdOf(it);
+      if (id) dupes.set(id, (dupes.get(id) || 0) + 1);
+    });
+    const grid = settings.view === 'grid';
+    el.listWrap.classList.toggle('grid', grid);
+    el.viewSeg.querySelectorAll('[data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === settings.view));
+    el.list.innerHTML = items.map((it) => rowHtml(it, cutSet, dupes)).join('');
 
     let state = '';
     if (!S.cwd && S.listError) {
@@ -803,6 +917,55 @@
       b.classList.toggle('desc', active && S.sort.dir < 0);
     });
     renderSelectionChrome();
+  }
+
+  /* Background identification: files without an ID in their metadata are read once
+     (540 bytes each) while nothing else is happening, and the ID is cached. */
+  const ident = { token: 0, running: false, again: false, left: 0 };
+  function scheduleIdentify() {
+    ident.token++;
+    if (ident.running) ident.again = true;
+    else setTimeout(runIdentify, 250);
+  }
+  function identifyQueue(dir) {
+    return S.items.filter((it) => isAmiiboCandidate(it) && !AM.idFromMeta(it.meta) && idCache.get(PP.join(dir, it.name), it.size) === undefined);
+  }
+  async function runIdentify() {
+    if (ident.running) return;
+    ident.running = true;
+    const token = ident.token;
+    try {
+      for (;;) {
+        if (token !== ident.token || S.conn !== 'on' || !S.client || !S.cwd) break;
+        if (J.running || J.list.some((j) => j.status === 'queued')) {
+          await P.sleep(700);
+          continue;
+        }
+        const dir = S.cwd;
+        const queue = identifyQueue(dir);
+        ident.left = queue.length;
+        renderStatus();
+        if (!queue.length) break;
+        const it = queue[0];
+        const p = PP.join(dir, it.name);
+        try {
+          const data = await S.client.readFile(p);
+          idCache.set(p, it.size, AM.idFromDump(data));
+        } catch (e) {
+          if (e.code === 'STATUS') idCache.set(p, it.size, '');
+          else break; // link trouble: try again on the next refresh
+        }
+        if (dir === S.cwd) scheduleListRender();
+      }
+    } finally {
+      ident.running = false;
+      ident.left = 0;
+      renderStatus();
+      if (ident.again) {
+        ident.again = false;
+        setTimeout(runIdentify, 100);
+      }
+    }
   }
 
   let listRenderQueued = false;
@@ -862,6 +1025,7 @@
     const dis = {
       'upload-files': !on,
       'new-folder': !on,
+      sync: !on,
       download: !on || !n,
       copy: !on || !n,
       cut: !on || !n,
@@ -888,6 +1052,7 @@
       let left = plural(S.items.length, 'item');
       if (S.filter) left += ` (${S.view.length} shown)`;
       if (sel.length) left += ` · ${sel.length} selected${selSize ? ` (${fmtSize(selSize)})` : ''}`;
+      if (ident.left) left += ` · identifying amiibo (${ident.left} left)`;
       el.statusLeft.textContent = left;
       const d = S.drives.find((v) => v.label === PP.drive(S.cwd));
       el.statusRight.textContent = d && d.ok ? `${d.label}: ${fmtSize(d.free)} free of ${fmtSize(d.total)}` : '';
@@ -1252,9 +1417,15 @@
 
   /* ---------------------------------------------------------------- uploads */
 
-  async function enqueueUploads(batch, destDir) {
+  async function enqueueUploads(batch, destDir, opts) {
+    opts = opts || {};
     if (S.conn !== 'on' || !destDir) return;
-    const files = batch.files.filter((f) => !JUNK.test(PP.basename(f.rel)));
+    let files = batch.files.filter((f) => !JUNK.test(PP.basename(f.rel)));
+    if (opts.review !== false && files.length) {
+      const reviewed = await reviewAmiiboUploads(files, destDir);
+      if (!reviewed) return;
+      files = reviewed;
+    }
     const dirSet = new Set((batch.dirs || []).filter(Boolean));
     files.forEach((f) => {
       const segs = f.rel.split('/');
@@ -1410,7 +1581,362 @@
       }
       throw e;
     }
+    if (AM.AMIIBO_SIZES.indexOf(data.length) >= 0) idCache.set(job.dest, data.length, AM.idFromDump(data));
     optimisticAdd(job.dest, { size: data.length });
+  }
+
+  /* ------------------------------------------------- smart amiibo uploads */
+
+  const cleanName = (s) =>
+    String(s)
+      .replace(/[\\/:*?"<>|\x00-\x1f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim() || 'Unnamed';
+
+  /**
+   * Looks inside the files being uploaded: converts Flipper .nfc / Proxmark .eml to .bin,
+   * flags files the Pixl.js won't load, and (optionally) sorts amiibo into series folders
+   * or renames them to the figure's name. Returns the new file list, or null if canceled.
+   */
+  async function reviewAmiiboUploads(files, destDir) {
+    const amiiboContext = /amiibo/i.test(destDir);
+    const rows = [];
+    const passthrough = [];
+    for (const f of files) {
+      const name = PP.basename(f.rel);
+      const ext = (name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+      const interesting = f.file.size <= 64 * 1024 && (['.bin', '.nfc', '.eml'].indexOf(ext) >= 0 || AM.AMIIBO_SIZES.indexOf(f.file.size) >= 0);
+      if (!interesting) {
+        passthrough.push(f);
+        continue;
+      }
+      let data;
+      try {
+        data = new Uint8Array(await f.file.arrayBuffer());
+      } catch (e) {
+        passthrough.push(f);
+        continue;
+      }
+      const a = AM.analyze(name, data, { amiiboContext });
+      rows.push({ f, a, info: a.id ? db.lookup(a.id) : null });
+    }
+    if (!rows.length) return files;
+
+    const amiibos = rows.filter((r) => r.a.kind === 'amiibo');
+    const converted = rows.filter((r) => r.a.converted);
+    const warned = rows.filter((r) => r.a.warning);
+    let choice = { sort: false, rename: false, skipBad: false };
+    const ask = settings.reviewUploads && (amiibos.length >= 2 || converted.length || warned.length);
+    if (ask) {
+      const saved = store.get('reviewChoice', {});
+      choice = await askReview(rows, amiibos, converted, warned, destDir, saved);
+      if (!choice) return null;
+      store.set('reviewChoice', { sort: choice.sort, rename: choice.rename });
+      if (choice.dontAsk) {
+        settings.reviewUploads = false;
+        saveSettings();
+      }
+    }
+    converted.forEach((r) => log('info', `Converted ${PP.basename(r.f.rel)} (${r.a.converted}) to ${r.a.name}`));
+
+    // Names already present in target folders, so renamed files don't overwrite anything.
+    const takenByFolder = new Map();
+    const takenIn = async (folderRel) => {
+      if (takenByFolder.has(folderRel)) return takenByFolder.get(folderRel);
+      const set = new Set();
+      takenByFolder.set(folderRel, set);
+      if (choice.rename) {
+        const devDir = folderRel ? PP.join(destDir, folderRel) : destDir;
+        const items = devDir === S.cwd ? S.items : await S.client.listDir(devDir).catch(() => []);
+        items.forEach((i) => set.add(i.name));
+      }
+      return set;
+    };
+
+    const out = passthrough.slice();
+    for (const r of rows) {
+      if (r.a.warning && choice.skipBad) {
+        log('warn', `Skipped ${PP.basename(r.f.rel)}: ${r.a.warning}`);
+        continue;
+      }
+      const segs = r.f.rel.split('/');
+      let folder = segs.slice(0, -1).join('/');
+      let name = r.a.name;
+      if (r.a.kind === 'amiibo' && r.info) {
+        if (choice.sort) folder = [folder, cleanName(r.info.series || 'Other')].filter(Boolean).join('/');
+        if (choice.rename && r.info.name) name = cleanName(r.info.name) + '.bin';
+      }
+      if (choice.rename || choice.sort) {
+        const taken = await takenIn(folder);
+        const budget = Math.max(8, PP.nameBudget(folder ? PP.join(destDir, folder) : destDir));
+        if (taken.has(name) || PP.byteLen(name) > budget) name = PP.unique(name, budget, (c) => taken.has(c));
+        taken.add(name);
+      }
+      const changed = name !== PP.basename(r.f.rel) || r.a.converted;
+      out.push({ file: changed ? new File([r.a.data], name) : r.f.file, rel: folder ? `${folder}/${name}` : name });
+    }
+    return out;
+  }
+
+  function askReview(rows, amiibos, converted, warned, destDir, saved) {
+    let sortEl, renameEl, skipEl, dontEl;
+    const dbReady = db.ready;
+    const summary = [
+      amiibos.length ? plural(amiibos.length, 'amiibo') : '',
+      converted.length ? `${converted.length} converted` : '',
+      warned.length ? `${plural(warned.length, 'problem')}` : '',
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const list = rows
+      .slice(0, 200)
+      .map((r) => {
+        const title = r.info && r.info.name ? r.info.name : r.a.name;
+        let status = '';
+        if (r.a.warning) status = `<span class="chip warn">${icon('alert')}${esc(r.a.warning)}</span>`;
+        else if (r.a.converted) status = `<span class="chip info">Converted from ${esc(r.a.converted)}</span>`;
+        else if (r.a.kind === 'amiibo') status = `<span class="chip ok">${esc((r.info && r.info.series) || 'Amiibo')}</span>`;
+        else if (r.a.kind === 'tag') status = '<span class="chip">Tag dump</span>';
+        const art =
+          r.info && settings.online
+            ? `<span class="fi fi-img"><img src="${esc(r.info.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentNode.classList.add('noimg');this.remove()">${icon('tag')}</span>`
+            : `<span class="fi fi-${r.a.kind === 'amiibo' ? 'tag' : 'file'}">${icon(r.a.kind === 'amiibo' ? 'tag' : 'file')}</span>`;
+        return `<li class="rv-row">${art}<div class="rv-main"><div class="rv-title">${esc(title)}</div><div class="rv-file">${esc(PP.basename(r.f.rel))}</div></div>${status}</li>`;
+      })
+      .join('');
+    return modal({
+      title: 'Review upload',
+      icon: 'tag',
+      wide: true,
+      body: `<p class="muted-line">${esc(summary)} going to <b>${esc(destDir)}</b></p>
+        <ul class="review-list">${list}</ul>
+        <label class="check-row"><input type="checkbox" id="rvSort" ${saved.sort ? 'checked' : ''} ${dbReady ? '' : 'disabled'}>
+          <span>Sort amiibo into folders by series<small>For example “Super Smash Bros.” or “Animal Crossing”.${dbReady ? '' : ' Needs the amiibo name list (turn on online lookups in Settings).'}</small></span></label>
+        <label class="check-row"><input type="checkbox" id="rvRename" ${saved.rename ? 'checked' : ''} ${dbReady ? '' : 'disabled'}>
+          <span>Rename files to the amiibo’s name<small>For example “Mario.bin”. Existing files are never overwritten.</small></span></label>
+        ${
+          warned.length
+            ? `<label class="check-row"><input type="checkbox" id="rvSkip" checked><span>Skip the ${plural(warned.length, 'file')} with problems</span></label>`
+            : ''
+        }
+        <label class="check-row"><input type="checkbox" id="rvDont"><span>Don’t show this again<small>You can turn it back on in Settings.</small></span></label>`,
+      actions: [
+        { label: 'Cancel', value: null },
+        {
+          label: 'Upload',
+          kind: 'primary',
+          submit: true,
+          value: () => ({
+            sort: !!(sortEl && sortEl.checked && !sortEl.disabled),
+            rename: !!(renameEl && renameEl.checked && !renameEl.disabled),
+            skipBad: !!(skipEl && skipEl.checked),
+            dontAsk: !!(dontEl && dontEl.checked),
+          }),
+        },
+      ],
+      init(d) {
+        sortEl = d.querySelector('#rvSort');
+        renameEl = d.querySelector('#rvRename');
+        skipEl = d.querySelector('#rvSkip');
+        dontEl = d.querySelector('#rvDont');
+        d.querySelector('.dlg-foot .btn.primary').focus();
+      },
+    });
+  }
+
+  /* --------------------------------------------------------- restore ZIP */
+
+  async function restoreZip(file, destDir) {
+    if (!file || !destDir) return;
+    let entries;
+    try {
+      entries = await P.readZip(file);
+    } catch (e) {
+      toast(`Couldn’t open ${file.name}: ${e.message}`, 'error');
+      return;
+    }
+    const files = [];
+    const dirs = [];
+    let bytes = 0;
+    try {
+      for (const e of entries) {
+        if (P.isJunkZipEntry(e.name)) continue;
+        const rel = e.name.replace(/^\/+/, '').replace(/\/+$/, '');
+        if (!rel || rel.split('/').some((s) => s === '..' || s === '.' || !s)) continue;
+        if (e.dir) {
+          dirs.push(rel);
+          continue;
+        }
+        const data = await e.read();
+        bytes += data.length;
+        files.push({ file: new File([data], PP.basename(rel)), rel });
+      }
+    } catch (e) {
+      toast(`Couldn’t read ${file.name}: ${e.message}`, 'error');
+      log('error', `Restore: ${e.message}`);
+      return;
+    }
+    if (!files.length && !dirs.length) {
+      toast(`${file.name} is empty`, 'info');
+      return;
+    }
+    const tops = Array.from(new Set(files.map((f) => f.rel.split('/')[0]).concat(dirs.map((d) => d.split('/')[0]))));
+    const ok = await modal({
+      title: `Restore ${file.name}?`,
+      icon: 'archive-in',
+      body: `<p>${plural(files.length, 'file')} (${fmtSize(bytes)}) will be copied into <b>${esc(destDir)}</b>:</p>${itemListHtml(tops, 12)}
+        <p>If something with the same name already exists, you’ll be asked what to do.</p>`,
+      actions: [
+        { label: 'Cancel', value: null },
+        { label: 'Restore', kind: 'primary', submit: true, value: true },
+      ],
+    });
+    if (!ok) return;
+    await enqueueUploads({ files, dirs }, destDir, { review: false });
+  }
+
+  /* ---------------------------------------------------- duplicate finder */
+
+  function findDuplicates(rootDir) {
+    addJob({
+      kind: 'scan',
+      icon: 'dupe',
+      title: `Find duplicate amiibo in ${rootDir}`,
+      detail: 'Scanning',
+      doneText: 'Scan finished',
+      run: async (job) => {
+        const sig = { signal: job.ctrl.signal };
+        const files = [];
+        async function walk(dir) {
+          if (job.ctrl.signal.aborted) throw P.abortError();
+          setPhase(job, `Scanning ${dir}`);
+          const items = await withRetry(() => S.client.listDir(dir), retryOpts('Open folder', sig));
+          for (const it of items) {
+            const p = PP.join(dir, it.name);
+            if (it.isDir) await walk(p);
+            else if (isAmiiboCandidate(it)) files.push({ path: p, size: it.size, meta: it.meta, id: AM.idFromMeta(it.meta) || idCache.get(p, it.size) });
+          }
+        }
+        await walk(rootDir);
+        const crcs = new Map();
+        const readOne = async (f) => {
+          const data = await readVerified(f.path, f.size, null, retryOpts('Read', sig));
+          crcs.set(f.path, P.crc32(data));
+          if (f.id === undefined) {
+            f.id = AM.idFromDump(data);
+            idCache.set(f.path, f.size, f.id);
+          }
+        };
+        const unknown = files.filter((f) => f.id === undefined);
+        let i = 0;
+        for (const f of unknown) {
+          if (job.ctrl.signal.aborted) throw P.abortError();
+          setPhase(job, `Identifying ${++i} of ${unknown.length}`);
+          setProgress(job, i, unknown.length * 2 || 1);
+          await readOne(f);
+        }
+        const groups = new Map();
+        files.forEach((f) => {
+          if (!f.id) return;
+          if (!groups.has(f.id)) groups.set(f.id, []);
+          groups.get(f.id).push(f);
+        });
+        const dupes = Array.from(groups.entries()).filter(([, list]) => list.length > 1);
+        const toHash = [].concat(...dupes.map(([, list]) => list)).filter((f) => !crcs.has(f.path));
+        i = 0;
+        for (const f of toHash) {
+          if (job.ctrl.signal.aborted) throw P.abortError();
+          setPhase(job, `Comparing ${++i} of ${toHash.length}`);
+          setProgress(job, unknown.length + i, unknown.length + toHash.length || 1);
+          await readOne(f);
+        }
+        job.result = dupes.map(([id, list]) => ({ id, info: db.lookup(id), files: list.map((f) => Object.assign(f, { crc: crcs.get(f.path) })) }));
+        job.doneText = dupes.length ? `${plural(dupes.length, 'amiibo')} found more than once` : 'No duplicates found';
+      },
+      after: async function () {
+        showDuplicates(this.result || [], rootDir);
+      },
+    });
+  }
+
+  async function showDuplicates(groups, rootDir) {
+    if (!groups.length) {
+      toast(`No duplicate amiibo in ${rootDir}`, 'ok');
+      return;
+    }
+    const html = groups
+      .map((g, gi) => {
+        const seen = new Set();
+        const rowsHtml = g.files
+          .map((f, fi) => {
+            const identical = seen.has(f.crc);
+            seen.add(f.crc);
+            return `<label class="dup-file"><input type="checkbox" data-g="${gi}" data-f="${fi}" ${identical ? 'checked' : ''}>
+              <span class="dup-path">${esc(f.path)}</span>${identical ? '<span class="chip">identical copy</span>' : ''}</label>`;
+          })
+          .join('');
+        const art = g.info && settings.online ? `<img src="${esc(g.info.image)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : icon('tag');
+        return `<div class="dup-group"><div class="dup-head"><span class="fi fi-img">${art}</span><b>${esc((g.info && g.info.name) || AM.prettyId(g.id))}</b>
+          <span class="muted">${esc((g.info && g.info.series) || '')} · ${g.files.length} files</span></div>${rowsHtml}</div>`;
+      })
+      .join('');
+    let picked = [];
+    const res = await modal({
+      title: `${plural(groups.length, 'amiibo')} found more than once`,
+      icon: 'dupe',
+      wide: true,
+      body: `<p class="muted-line">Identical copies are pre-selected. Files that are the same amiibo but differ (for example separate saves) are not.</p><div class="dup-list">${html}</div>`,
+      actions: [
+        { label: 'Close', value: null },
+        {
+          label: 'Delete selected',
+          kind: 'danger',
+          submit: true,
+          value: () => picked,
+        },
+      ],
+      init(d) {
+        const upd = () => {
+          picked = Array.from(d.querySelectorAll('.dup-file input:checked')).map((c) => groups[+c.dataset.g].files[+c.dataset.f].path);
+          d.querySelector('.dlg-foot .btn.danger').textContent = picked.length ? `Delete ${picked.length} selected` : 'Delete selected';
+          d.querySelector('.dlg-foot .btn.danger').disabled = !picked.length;
+        };
+        d.addEventListener('change', upd);
+        upd();
+      },
+    });
+    if (!res || !res.length) return;
+    const ok = await modal({
+      title: `Delete ${plural(res.length, 'file')}?`,
+      icon: 'trash',
+      tone: 'danger',
+      body: `${itemListHtml(res)}<p>This can’t be undone.</p>`,
+      actions: [
+        { label: 'Cancel', value: null },
+        { label: 'Delete', kind: 'danger', submit: true, value: true },
+      ],
+    });
+    if (ok) queueDeletePaths(res);
+  }
+
+  function queueDeletePaths(paths) {
+    addJob({
+      kind: 'delete',
+      icon: 'trash',
+      title: `Delete ${plural(paths.length, 'file')}`,
+      doneText: `${plural(paths.length, 'file')} deleted`,
+      affects: S.cwd,
+      run: async (job) => {
+        let i = 0;
+        for (const p of paths) {
+          if (job.ctrl.signal.aborted) throw P.abortError();
+          setPhase(job, `Deleting ${PP.basename(p)}`);
+          await removeSafe(p, retryOpts('Delete', { signal: job.ctrl.signal }));
+          optimisticRemove(p);
+          setProgress(job, ++i, paths.length);
+        }
+      },
+    });
   }
 
   function collectDropEntries(dt) {
@@ -1833,17 +2359,24 @@
   async function properties(it) {
     if (!it || !S.cwd) return;
     const p = PP.join(S.cwd, it.name);
-    const id = P.amiiboId(it.meta);
+    const id = amiiboIdOf(it);
+    const info = id ? db.lookup(id) : null;
     const kind = kindOf(it);
     let notesEl, hidEl, roEl, errEl;
+    const hero =
+      info && settings.online
+        ? `<div class="prop-hero"><span class="fi fi-img big"><img src="${esc(info.image)}" alt="" referrerpolicy="no-referrer" onerror="this.parentNode.classList.add('noimg');this.remove()">${icon('tag')}</span>
+           <div><div class="prop-name">${esc(info.name || 'Unknown amiibo')}</div><div class="muted">${esc([info.series && info.series + ' series', info.game].filter(Boolean).join(' · '))}</div></div></div>`
+        : '';
     const res = await modal({
       title: it.name,
       icon: kind,
-      body: `<dl class="kv">
+      body: `${hero}<dl class="kv">
           <dt>Location</dt><dd>${esc(PP.parent(p))}</dd>
-          <dt>Type</dt><dd>${it.isDir ? 'Folder' : kind === 'tag' ? 'Amiibo data' : 'File'}</dd>
+          <dt>Type</dt><dd>${it.isDir ? 'Folder' : kind === 'tag' ? `Amiibo${info && info.type ? ' ' + esc(info.type.toLowerCase()) : ''} data` : 'File'}</dd>
           ${it.isDir ? '' : `<dt>Size</dt><dd>${fmtSize(it.size)} (${it.size.toLocaleString()} bytes)</dd>`}
-          ${id ? `<dt>Amiibo ID</dt><dd class="mono">${id}</dd>` : ''}
+          ${info && info.name && !settings.online ? `<dt>Amiibo</dt><dd>${esc(info.name)}${info.series ? ' (' + esc(info.series) + ')' : ''}</dd>` : ''}
+          ${id ? `<dt>Amiibo ID</dt><dd class="mono">${AM.prettyId(id)}</dd>` : ''}
         </dl>
         <label class="field"><span>Notes <em id="notesCount"></em></span>
           <input type="text" id="notesIn" value="${esc(it.meta.notes || '')}" placeholder="Shown on the device" autocomplete="off"></label>
@@ -1962,7 +2495,9 @@
   const actions = {
     'upload-files': () => el.fileInput.click(),
     'upload-folder': () => el.folderInput.click(),
+    'restore-zip': () => el.zipInput.click(),
     'new-folder': newFolder,
+    sync: () => (P.syncUI ? P.syncUI.open(ctx) : toast('Folder sync isn’t available', 'error')),
     download: () => download(selectedItems()),
     copy: () => setClipboard('copy'),
     cut: () => setClipboard('cut'),
@@ -1997,12 +2532,123 @@
     showMenu(x, y, [
       { label: 'Upload files…', icon: 'upload', act: actions['upload-files'] },
       { label: 'Upload folder…', icon: 'folder', act: actions['upload-folder'] },
+      { label: 'Restore from ZIP backup…', icon: 'archive-in', act: actions['restore-zip'] },
       { label: 'New folder', icon: 'folder-plus', kbd: 'Ctrl+Shift+N', act: actions['new-folder'] },
       '-',
       { label: 'Paste', icon: 'paste', kbd: 'Ctrl+V', disabled: !S.clipboard, act: actions.paste },
+      { label: 'Find duplicate amiibo here', icon: 'dupe', act: () => findDuplicates(S.cwd) },
       { label: 'Refresh', icon: 'refresh', kbd: 'F5', act: () => refresh() },
       { label: 'Select all', icon: 'check', kbd: 'Ctrl+A', disabled: !S.view.length, act: selectAll },
     ]);
+  }
+
+  function setView(view) {
+    settings.view = view;
+    saveSettings();
+    renderList();
+  }
+
+  /* --------------------------------------------------------------- settings */
+
+  async function openSettings() {
+    let f = {};
+    const res = await modal({
+      title: 'Settings',
+      icon: 'gear',
+      body: `
+        <label class="check-row"><input type="checkbox" id="stOnline" ${settings.online ? 'checked' : ''}>
+          <span>Show amiibo names and pictures<small>Downloads the open AmiiboAPI name list and pictures from GitHub. Only those public files are requested; nothing about your files is sent.</small></span></label>
+        <label class="check-row"><input type="checkbox" id="stReview" ${settings.reviewUploads ? 'checked' : ''}>
+          <span>Review amiibo uploads<small>Before uploading several amiibo, or files that need converting, show what’s in them and offer to sort or rename.</small></span></label>
+        <label class="check-row"><input type="checkbox" id="stVerify" ${el.verifyChk.checked ? 'checked' : ''}>
+          <span>Verify uploads<small>Read every uploaded or copied file back and compare it byte for byte.</small></span></label>
+        <label class="check-row"><input type="checkbox" id="stFast" ${settings.fast ? 'checked' : ''}>
+          <span>Fast transfers (experimental)<small>Sends several packets before waiting for the device to confirm. Faster for big files; turns itself off if the device can’t keep up. Keep “Verify uploads” on while trying it.</small></span></label>
+        <div class="settings-actions">
+          <button type="button" class="btn sm" id="stRefreshDb">${icon('refresh')}<span>Update amiibo name list</span></button>
+          <button type="button" class="btn sm" id="stClearCache">${icon('erase')}<span>Forget identified files</span></button>
+        </div>
+        <p class="muted-line" id="stDbInfo"></p>`,
+      actions: [
+        { label: 'Cancel', value: null },
+        {
+          label: 'Save',
+          kind: 'primary',
+          submit: true,
+          value: () => ({ online: f.online.checked, review: f.review.checked, verify: f.verify.checked, fast: f.fast.checked }),
+        },
+      ],
+      init(d) {
+        ['online', 'review', 'verify', 'fast'].forEach((k) => (f[k] = d.querySelector('#st' + k[0].toUpperCase() + k.slice(1))));
+        const info = d.querySelector('#stDbInfo');
+        const showInfo = () => {
+          info.textContent = db.ready
+            ? `Name list: ${Object.keys(db.data.a).length} amiibo, updated ${new Date(db.data.t).toLocaleDateString()}. ${Object.keys(idCache.map).length} files identified.`
+            : 'Name list not downloaded yet.';
+        };
+        showInfo();
+        d.querySelector('#stRefreshDb').onclick = async () => {
+          info.textContent = 'Downloading…';
+          try {
+            await db.refresh();
+            showInfo();
+            renderList();
+          } catch (e) {
+            info.textContent = 'Couldn’t download: ' + e.message;
+          }
+        };
+        d.querySelector('#stClearCache').onclick = () => {
+          idCache.map = {};
+          idCache.save();
+          showInfo();
+          scheduleIdentify();
+        };
+        d.querySelector('.dlg-foot .btn.primary').focus();
+      },
+    });
+    if (!res) return;
+    settings.online = res.online;
+    settings.reviewUploads = res.review;
+    settings.fast = res.fast;
+    saveSettings();
+    el.verifyChk.checked = res.verify;
+    store.set('verify', res.verify);
+    applyClientSettings();
+    if (settings.online) db.load(true);
+    renderList();
+  }
+
+  function applyClientSettings() {
+    if (S.client) {
+      S.client.fastWrites = !!settings.fast;
+      S.client.verbose = el.verboseChk.checked;
+    }
+  }
+
+  /* ------------------------------------------------------------ install app */
+
+  let installPrompt = null;
+  function setupPwa() {
+    if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+      navigator.serviceWorker.register('sw.js').catch((e) => log('debug', 'Service worker: ' + e.message));
+    }
+    window.addEventListener('beforeinstallprompt', (ev) => {
+      ev.preventDefault();
+      installPrompt = ev;
+      el.installBtn.hidden = false;
+    });
+    window.addEventListener('appinstalled', () => {
+      el.installBtn.hidden = true;
+      installPrompt = null;
+      toast('Installed. You can open Pixl File Manager from your Start menu or desktop.', 'ok');
+    });
+    el.installBtn.addEventListener('click', async () => {
+      if (!installPrompt) return;
+      installPrompt.prompt();
+      await installPrompt.userChoice.catch(() => null);
+      installPrompt = null;
+      el.installBtn.hidden = true;
+    });
   }
 
   function selectAll() {
@@ -2078,8 +2724,22 @@
       showMenu(r.left - 80, r.bottom + 4, [
         { label: 'Upload files…', icon: 'file', act: actions['upload-files'] },
         { label: 'Upload a folder…', icon: 'folder', act: actions['upload-folder'] },
+        { label: 'Restore from ZIP backup…', icon: 'archive-in', act: actions['restore-zip'] },
       ]);
     });
+    el.zipInput.addEventListener('change', () => {
+      const f = el.zipInput.files[0];
+      el.zipInput.value = '';
+      if (f) restoreZip(f, S.cwd);
+    });
+    el.viewSeg.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-view]');
+      if (b) setView(b.dataset.view);
+    });
+    el.settingsBtn.addEventListener('click', openSettings);
+    const openFirmware = () => (P.firmwareUI ? P.firmwareUI.open(ctx) : toast('Firmware update isn’t available', 'error'));
+    el.sideFirmware.addEventListener('click', openFirmware);
+    el.welcomeFirmware.addEventListener('click', openFirmware);
 
     el.fileInput.addEventListener('change', () => {
       const files = Array.from(el.fileInput.files).map((f) => ({ file: f, rel: f.name }));
@@ -2410,7 +3070,25 @@
         const dest = t ? t.path : S.cwd;
         const collected = collectDropEntries(ev.dataTransfer);
         entriesToBatch(collected)
-          .then((batch) => enqueueUploads(batch, dest))
+          .then(async (batch) => {
+            // A single ZIP dropped: offer to unpack it (e.g. restoring a backup)
+            if (batch.files.length === 1 && !batch.dirs.length && /\.zip$/i.test(batch.files[0].rel)) {
+              const zip = batch.files[0].file;
+              const how = await modal({
+                title: `What should happen with ${zip.name}?`,
+                icon: 'zip',
+                body: '<p>You can unpack it and upload what’s inside (for example to restore a backup), or upload the ZIP file itself.</p>',
+                actions: [
+                  { label: 'Cancel', value: null },
+                  { label: 'Upload the ZIP file', value: 'file' },
+                  { label: 'Unpack and upload', kind: 'primary', submit: true, value: 'unpack' },
+                ],
+              });
+              if (how === 'unpack') return restoreZip(zip, dest);
+              if (how !== 'file') return;
+            }
+            return enqueueUploads(batch, dest);
+          })
           .catch((e) => {
             toast('Couldn’t read the dropped files: ' + e.message, 'error');
             log('error', 'Drop: ' + e.message);
@@ -2454,6 +3132,61 @@
 
   /* ------------------------------------------------------------------- init */
 
+  /* Shared context for feature modules (folder sync, firmware update). */
+  const ctx = {
+    S,
+    J,
+    el,
+    settings,
+    P,
+    PP,
+    log,
+    toast,
+    modal,
+    esc,
+    icon,
+    plural,
+    fmtSize,
+    addJob,
+    setPhase,
+    setProgress,
+    retryOpts,
+    withRetry,
+    readVerified,
+    writeAndVerify,
+    ensureDir,
+    removeSafe,
+    refresh,
+    loadDrives,
+    navigate,
+    connect,
+    userDisconnect,
+    idCache,
+    get verify() {
+      return el.verifyChk.checked;
+    },
+    get client() {
+      return S.client;
+    },
+    get connected() {
+      return S.conn === 'on';
+    },
+    // used by the firmware updater to drop the file-transfer link without prompts
+    disconnectQuietly() {
+      const t = S.transport;
+      if (!t) return;
+      t.userClosed = true;
+      try {
+        t.disconnect();
+      } catch (_) {
+        /* ignore */
+      }
+      setTimeout(() => {
+        if (S.transport === t) finishDisconnect();
+      }, 300);
+    },
+  };
+
   function init() {
     applyTheme(store.get('theme', null));
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => applyTheme(document.documentElement.dataset.theme || null));
@@ -2462,6 +3195,13 @@
     showSupportWarning();
     setConn('off');
     renderAll();
+    setupPwa();
+    if (!(P.syncUI && P.syncUI.supported())) {
+      const b = el.actions.querySelector('[data-act="sync"]');
+      if (b) b.hidden = true;
+    }
+    db.onChange(() => scheduleListRender());
+    db.load(settings.online);
     log('info', P.BleTransport.supported() ? 'Ready. Web Bluetooth is available.' : 'Ready. Web Bluetooth is not available in this browser (demo still works).');
     if (params.has('demo')) connect(true);
   }
@@ -2470,15 +3210,22 @@
   window.PixlApp = {
     S,
     J,
+    ctx,
+    db,
+    idCache,
+    settings,
     logs,
     connect,
     navigate,
     refresh,
     enqueueUploads,
+    restoreZip,
+    findDuplicates,
     transferItems,
     download,
     deleteItems,
     renameItem,
+    setView,
     get client() {
       return S.client;
     },

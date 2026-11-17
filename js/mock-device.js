@@ -40,6 +40,35 @@
     return Pixl.encodeMeta({ notes: notes || '', hidden: !!hidden, amiibo: { head, tail } });
   }
 
+  /** A fake but structurally valid 540-byte amiibo dump carrying a real amiibo ID. */
+  function amiiboDump(idHex, seed) {
+    const d = seeded(540, seed);
+    d.set([0x04, 0x11, 0x22, 0xa7], 0); // UID start
+    d.set([0xf1, 0x10, 0xff, 0xee], 12); // capability container used by amiibo
+    for (let i = 0; i < 8; i++) d[0x54 + i] = parseInt(idHex.substr(i * 2, 2), 16);
+    return d;
+  }
+  function idMeta(idHex, notes) {
+    return amiiboMeta(parseInt(idHex.slice(0, 8), 16), parseInt(idHex.slice(8), 16), notes);
+  }
+
+  // [file name, amiibo id, notes, store the id in metadata like the device's amiibo DB does?]
+  const DEMO_SETS = {
+    'Super Smash Bros.': [
+      ['Mario.bin', '0000000000000002', 'My first amiibo', true],
+      ['Link.bin', '0100000000040002', '', true],
+      ['Pikachu.bin', '1919000000090002', '', false],
+      ['Kirby.bin', '1f000000000a0002', '', false],
+      ['Samus.bin', '05c0000000060002', '', true],
+      ['Fox.bin', '0580000000050002', '', false],
+    ],
+    'Animal Crossing': [
+      ['Isabelle.bin', '0181000100440502', 'Summer outfit', true],
+      ['Celeste.bin', '0193000103ae0502', '', false],
+      ['Isabelle (2).bin', '0181000100440502', '', false],
+    ],
+  };
+
   class MockFS {
     constructor() {
       this.drives = { E: dir() };
@@ -50,23 +79,19 @@
       const root = this.drives.E;
       const amiibo = dir();
       root.children.set('amiibo', amiibo);
-      const series = [
-        ['Series A', 6],
-        ['Series B', 4],
-        ['Favorites', 3],
-      ];
-      let id = 1;
-      for (const [name, count] of series) {
+      let seed = 1;
+      Object.keys(DEMO_SETS).forEach((folder) => {
         const d = dir();
-        amiibo.children.set(name, d);
-        for (let i = 1; i <= count; i++, id++) {
-          const head = (0x01000000 + id * 0x10100) >>> 0;
-          const tail = (0x00010002 + id * 0x100) >>> 0;
-          const notes = i === 1 ? `Sample note for figure ${id}` : '';
-          d.children.set(`figure-${String(id).padStart(3, '0')}.bin`, file(seeded(540, id), amiiboMeta(head, tail, notes)));
-        }
-      }
-      amiibo.children.set('loose-figure.bin', file(seeded(540, 99), amiiboMeta(0x0a0b0c0d, 0x00020002)));
+        amiibo.children.set(folder, d);
+        DEMO_SETS[folder].forEach(([name, id, notes, withMeta]) => {
+          const data = amiiboDump(id, seed++);
+          d.children.set(name, file(data, withMeta ? idMeta(id, notes) : notes ? Pixl.encodeMeta({ notes }) : undefined));
+        });
+      });
+      // the same Isabelle twice as an identical copy, for the duplicate finder
+      const isa = amiibo.children.get('Animal Crossing').children.get('Isabelle.bin');
+      amiibo.children.set('Isabelle copy.bin', file(isa.data.slice()));
+      amiibo.children.set('Zelda.bin', file(amiiboDump('0101000003560902', 50)));
       amiibo.children.set('Empty folder', dir());
 
       const player = dir();
