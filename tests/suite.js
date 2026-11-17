@@ -214,6 +214,64 @@
     assert.equal(db.lookup('00000000ffff0102').name, 'Mario', 'unknown figure falls back to character');
   });
 
+  test('amiibo: release dates and game list are parsed', () => {
+    const db = new P.amiibo.AmiiboDb({ storage: null, fetch: null });
+    db.ingest({ amiibos: { '0x0000000000000002': { name: 'Mario', release: { na: '2014-11-21', eu: '2014-11-28', jp: '2014-12-06', au: null } } } });
+    assert.deepEqual(db.lookup('0000000000000002').release, { na: '2014-11-21', eu: '2014-11-28', jp: '2014-12-06', au: '' });
+    assert.equal(db.games('0000000000000002'), null, 'not loaded yet');
+    db.ingestGames({
+      amiibos: {
+        '0x0000000000000002': {
+          games3DS: [{ gameName: 'Old game', amiiboUsage: [{ Usage: 'Unlock a hat', write: false }] }],
+          gamesSwitch: [{ gameName: 'New game', amiiboUsage: [{ Usage: 'Save progress', write: true }, { Usage: 'Costume', write: false }] }],
+        },
+      },
+    });
+    const g = db.games('0000000000000002');
+    assert.equal(g.length, 2);
+    assert.equal(g[0].platform, 'Switch', 'newest platform first');
+    assert.equal(g[0].writes, true);
+    assert.equal(g[0].usage, 'Save progress · Costume');
+    assert.deepEqual(db.games('ffffffffffffffff'), []);
+  });
+
+  /* ------------------------------------------------------------ organize */
+
+  const mario = { name: 'Mario', series: 'Super Smash Bros.', game: 'Super Mario' };
+  const isabelle = { name: 'Isabelle', series: 'Animal Crossing', game: 'Animal Crossing' };
+
+  test('organize: files go to <Series>/<Name>.bin; trailing dots kept on the device, dropped on a PC', () => {
+    const o = P.organize;
+    assert.deepEqual(o.targetFor(mario, { group: 'series', naming: 'name' }, 'x.bin'), { folder: 'Super Smash Bros.', name: 'Mario.bin' });
+    assert.deepEqual(o.targetFor(mario, { group: 'series', naming: 'name', pc: true }, 'x.bin'), { folder: 'Super Smash Bros', name: 'Mario.bin' });
+    assert.deepEqual(o.targetFor(mario, { group: 'game', naming: 'keep' }, 'x.bin'), { folder: 'Super Mario', name: 'x.bin' });
+    assert.deepEqual(o.targetFor(mario, { group: 'none' }, 'x.bin'), { folder: '', name: 'Mario.bin' });
+    assert.equal(o.clean('A/B: "C"?'), 'A B C', 'characters files can’t have are removed');
+    assert.ok(o.isVariantOf('Mario (2).bin', 'Mario.bin'));
+    assert.ok(!o.isVariantOf('Mario Kart.bin', 'Mario.bin'));
+  });
+
+  test('organize: placement never overwrites and leaves tidy files alone', () => {
+    const items = [
+      { path: 'E:/amiibo/Super Smash Bros./Mario.bin', id: '1', info: mario },
+      { path: 'E:/amiibo/Super Smash Bros./Mario (2).bin', id: '1', info: mario },
+      { path: 'E:/amiibo/loose.bin', id: '1', info: mario },
+      { path: 'E:/amiibo/isa.bin', id: '2', info: isabelle },
+      { path: 'E:/amiibo/what.bin', id: null, info: null },
+    ];
+    const occupied = items.map((i) => i.path).concat(['E:/amiibo/Animal Crossing/Isabelle.bin']);
+    const r = P.organize.place(items, occupied, 'E:/amiibo', { group: 'series', naming: 'name' });
+    assert.equal(r.inPlace.length, 2, 'Mario.bin and Mario (2).bin are already right');
+    assert.equal(r.unknown.length, 1);
+    assert.deepEqual(
+      r.moves.map((m) => m.to),
+      ['E:/amiibo/Super Smash Bros./Mario (3).bin', 'E:/amiibo/Animal Crossing/Isabelle (2).bin']
+    );
+    // new files (library "Send") go next to existing ones without clashing
+    const send = P.organize.place([{ name: 'm.bin', id: '1', info: mario }], occupied, 'E:/amiibo', { group: 'series' });
+    assert.equal(send.moves[0].to, 'E:/amiibo/Super Smash Bros./Mario (3).bin');
+  });
+
   /* ----------------------------------------------------------------- zip */
 
   test('zip: write then read back (stored, UTF-8 names, folders)', async () => {

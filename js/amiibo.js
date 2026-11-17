@@ -12,8 +12,15 @@
   const Pixl = (global.Pixl = global.Pixl || {});
 
   const DB_URL = 'https://raw.githubusercontent.com/N3evin/AmiiboAPI/master/database/amiibo.json';
+  const GAMES_URL = 'https://raw.githubusercontent.com/N3evin/AmiiboAPI/master/database/games_info.json';
   const IMG_BASE = 'https://raw.githubusercontent.com/N3evin/AmiiboAPI/master/images/';
-  const CACHE_KEY = 'pixlfm.amiibodb.v1';
+  const CACHE_KEY = 'pixlfm.amiibodb.v2';
+  const PLATFORMS = [
+    ['gamesSwitch2', 'Switch 2'],
+    ['gamesSwitch', 'Switch'],
+    ['gamesWiiU', 'Wii U'],
+    ['games3DS', '3DS'],
+  ];
   const MAX_AGE = 7 * 24 * 3600 * 1000;
 
   const AMIIBO_SIZES = [532, 540, 572]; // NTAG215 dumps: TagMo, standard, with signature
@@ -104,12 +111,17 @@
         return out;
       };
       const a = {};
+      const r = {};
       Object.keys(json.amiibos || {}).forEach((k) => {
-        a[k.replace(/^0x/i, '').toLowerCase()] = json.amiibos[k].name;
+        const id = k.replace(/^0x/i, '').toLowerCase();
+        const e = json.amiibos[k];
+        a[id] = e.name;
+        if (e.release) r[id] = [e.release.na || '', e.release.eu || '', e.release.jp || '', e.release.au || ''];
       });
       this.data = {
         t: Date.now(),
         a,
+        r,
         s: strip(json.amiibo_series),
         g: strip(json.game_series),
         c: strip(json.characters),
@@ -117,14 +129,63 @@
       };
     }
 
+    /** Which games each amiibo works with (2.5 MB, so only fetched when first needed). */
+    loadGames() {
+      if (this._games) return Promise.resolve(this._games);
+      if (!this._gamesP) {
+        if (!this.fetch) return Promise.reject(new Error('Offline'));
+        this._gamesP = this.fetch(GAMES_URL)
+          .then((res) => {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            return res.json();
+          })
+          .then((json) => this.ingestGames(json))
+          .catch((e) => {
+            this._gamesP = null;
+            throw e;
+          });
+      }
+      return this._gamesP;
+    }
+
+    ingestGames(json) {
+      const out = {};
+      const src = (json && json.amiibos) || {};
+      Object.keys(src).forEach((k) => {
+        const list = [];
+        PLATFORMS.forEach(([key, platform]) => {
+          (src[k][key] || []).forEach((g) => {
+            const uses = g.amiiboUsage || [];
+            list.push({
+              platform,
+              game: g.gameName,
+              usage: uses.map((u) => u.Usage).filter(Boolean).join(' · '),
+              writes: uses.some((u) => u.write),
+            });
+          });
+        });
+        out[k.replace(/^0x/i, '').toLowerCase()] = list;
+      });
+      this._games = out;
+      return out;
+    }
+
+    /** Games for an ID once loaded; null while not loaded. */
+    games(id) {
+      return this._games ? this._games[(id || '').toLowerCase()] || [] : null;
+    }
+
     /** Info for an ID (16 hex). Works partially even for figures newer than the list. */
     lookup(id) {
       if (!id) return null;
       id = id.toLowerCase();
       const d = this.data;
-      const info = { id, name: null, series: null, game: null, character: null, type: null, image: imageUrl(id) };
+      const info = { id, name: null, series: null, game: null, character: null, type: null, release: null, known: false, image: imageUrl(id) };
       if (!d) return info;
+      info.known = !!d.a[id];
       info.name = d.a[id] || null;
+      const rel = d.r && d.r[id];
+      if (rel) info.release = { na: rel[0], eu: rel[1], jp: rel[2], au: rel[3] };
       info.series = d.s[id.slice(12, 14)] || null;
       info.game = d.g[id.slice(0, 3)] || null;
       info.character = d.c[id.slice(0, 4)] || null;
@@ -242,5 +303,6 @@
     parseFlipper,
     parseEml,
     DB_URL,
+    GAMES_URL,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

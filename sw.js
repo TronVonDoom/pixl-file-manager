@@ -1,18 +1,22 @@
 /* Service worker: makes the app work offline and installable.
    App files: network first (so updates show up), cache as fallback.
    Amiibo pictures: cache first. Amiibo name list: network first. */
-const VERSION = 'pixlfm-v2';
+const VERSION = 'pixlfm-v3';
 const SHELL = [
   './',
   'index.html',
   'manifest.webmanifest',
   'css/app.css',
+  'css/amiibo.css',
   'js/protocol.js',
   'js/transport-ble.js',
   'js/mock-device.js',
   'js/zip.js',
   'js/unzip.js',
   'js/amiibo.js',
+  'js/organize.js',
+  'js/amiibo-ui.js',
+  'js/library.js',
   'js/dfu.js',
   'js/mock-dfu.js',
   'js/sync.js',

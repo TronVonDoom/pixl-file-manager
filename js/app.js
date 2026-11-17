@@ -48,7 +48,10 @@
   /* ----------------------------------------------------------- amiibo data */
 
   const AM = P.amiibo;
-  const settings = Object.assign({ online: true, view: 'list', reviewUploads: true, fast: false }, store.get('settings', {}));
+  const settings = Object.assign(
+    { online: true, view: 'list', reviewUploads: true, fast: false, info: true, group: 'series', naming: 'name', amiiboRoot: 'amiibo' },
+    store.get('settings', {})
+  );
   function saveSettings() {
     store.set('settings', settings);
   }
@@ -112,7 +115,7 @@
     'listHead', 'checkAll', 'list', 'listState', 'statusLeft', 'clipChip', 'statusRight', 'panel', 'xferBadge', 'logBadge',
     'xferSummary', 'verifyChk', 'clearDone', 'verboseChk', 'copyLog', 'clearLog', 'panelToggle', 'xferList', 'logList',
     'menu', 'dropOverlay', 'dropTarget', 'toasts', 'dlg', 'fileInput', 'folderInput', 'zipInput', 'installBtn', 'settingsBtn',
-    'sideFirmware', 'viewSeg', 'welcomeFirmware',
+    'sideFirmware', 'viewSeg', 'welcomeFirmware', 'infoPanel', 'infoBody', 'infoToggle', 'infoClose', 'modeTabs', 'library',
   ].forEach((id) => (el[id] = document.getElementById(id)));
 
   /* ------------------------------------------------------------------ state */
@@ -140,6 +143,7 @@
     back: [],
     fwd: [],
     dragging: null,
+    mode: 'files', // files | library
   };
 
   /* -------------------------------------------------------------------- log */
@@ -439,6 +443,9 @@
     el.demoBtn.disabled = state === 'connecting';
     el.welcomeConnect.querySelector('span').textContent = state === 'connecting' ? 'Connecting…' : 'Connect device';
     el.banner.hidden = state !== 'lost';
+    el.modeTabs.hidden = !inSession;
+    if (!inSession && S.mode !== 'files') setMode('files');
+    applyInfoVisibility();
     if (state === 'on') settleWaiters();
     updateActions();
     renderJobsSummary();
@@ -587,6 +594,7 @@
     S.back = [];
     S.fwd = [];
     S.listError = '';
+    if (P.libraryUI) P.libraryUI.resetDevice();
     setConn('off');
     renderAll();
     if (wasConnected) log('info', 'Disconnected');
@@ -824,11 +832,151 @@
   }
 
   function artHtml(it, info, kind, cls) {
-    if (info && settings.online) {
-      return `<span class="fi fi-img ${cls || ''}"><img src="${esc(info.image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer"
-        onerror="this.parentNode.classList.add('noimg');this.remove()">${icon('tag')}</span>`;
-    }
+    // amiibo: picture with an original placeholder figure underneath (shown if there's no picture)
+    if (info) return `<span class="fi fi-art ${cls || ''}">${AUI.art(info, { online: settings.online })}</span>`;
     return `<span class="fi fi-${kind} ${cls || ''}">${icon(kind)}</span>`;
+  }
+
+  /* ------------------------------------------------------------ info panel */
+
+  const AUI = P.amiiboUI;
+  let infoOverride = null; // set by the library view
+  let lastInfoKey = '';
+  let infoQueued = false;
+
+  function applyInfoVisibility() {
+    const inSession = S.conn === 'on' || S.conn === 'lost';
+    const show = !!settings.info && inSession;
+    el.infoPanel.hidden = !show;
+    el.app.classList.toggle('info-open', show);
+    el.infoToggle.classList.toggle('active', !!settings.info);
+    if (show) {
+      lastInfoKey = '';
+      scheduleInfo();
+    }
+  }
+  function toggleInfo(force) {
+    settings.info = force != null ? force : !settings.info;
+    saveSettings();
+    applyInfoVisibility();
+  }
+  function scheduleInfo() {
+    if (infoQueued) return;
+    infoQueued = true;
+    requestAnimationFrame(() => {
+      infoQueued = false;
+      renderInfo();
+    });
+  }
+  function setInfo(model) {
+    infoOverride = model;
+    scheduleInfo();
+  }
+
+  function deviceAmiiboModel(it, dir, extra) {
+    const id = amiiboIdOf(it, dir);
+    const file = { name: it.name, path: dir, size: it.size, notes: it.meta.notes, hidden: it.meta.hidden };
+    if (!id) return Object.assign({ kind: 'file', file }, extra || {});
+    return Object.assign({ kind: 'amiibo', id, info: db.lookup(id), games: settings.online ? db.games(id) : [], file, source: 'device' }, extra || {});
+  }
+
+  function infoModel() {
+    if (S.mode === 'library') return infoOverride || { kind: 'empty', title: 'Amiibo library', text: 'Click an amiibo on either side to see its details.' };
+    if (!S.cwd) return { kind: 'empty', title: 'Nothing open', text: '' };
+    const sel = selectedItems();
+    if (sel.length > 1) {
+      const infos = sel.map((it) => amiiboInfo(it));
+      return {
+        kind: 'multi',
+        count: sel.length,
+        size: sel.reduce((n, i) => n + (i.isDir ? 0 : i.size), 0),
+        amiibo: infos.filter(Boolean).length,
+        thumbs: infos.filter(Boolean),
+        actions: [
+          { act: 'download', icon: 'download', label: 'Download' },
+          { act: 'organize', icon: 'sparkle', label: 'Organize' },
+        ],
+      };
+    }
+    const it = sel[0];
+    if (!it) {
+      const counts = new Map();
+      let amiibo = 0;
+      S.items.forEach((x) => {
+        const info = amiiboInfo(x);
+        if (!info) return;
+        amiibo++;
+        const s = info.series || 'Unknown series';
+        counts.set(s, (counts.get(s) || 0) + 1);
+      });
+      return {
+        kind: 'overview',
+        title: PP.isRoot(S.cwd) ? `${PP.drive(S.cwd)}: drive` : PP.basename(S.cwd),
+        path: S.cwd,
+        items: S.items.length,
+        amiibo,
+        series: Array.from(counts.entries()).sort((a, b) => b[1] - a[1]),
+        actions: amiibo ? [{ act: 'organize', icon: 'sparkle', label: 'Organize this folder' }] : [],
+      };
+    }
+    if (it.isDir) {
+      return {
+        kind: 'folder',
+        file: { name: it.name, path: S.cwd, notes: it.meta.notes },
+        actions: [
+          { act: 'open', icon: 'folder', label: 'Open' },
+          { act: 'download', icon: 'zip', label: 'Download ZIP' },
+        ],
+      };
+    }
+    const m = deviceAmiiboModel(it, S.cwd, {
+      actions: [
+        { act: 'download', icon: 'download', label: 'Download' },
+        { act: 'props', icon: 'info', label: 'Notes & properties' },
+      ],
+    });
+    if (m.kind === 'file') m.file.tagKind = isAmiiboCandidate(it) ? 'Tag dump (no amiibo ID)' : 'File';
+    return m;
+  }
+
+  function renderInfo() {
+    if (el.infoPanel.hidden) return;
+    const m = infoModel();
+    if (m.kind === 'amiibo') m.games = settings.online ? db.games(m.id) : [];
+    const key = JSON.stringify([
+      m.kind,
+      m.id,
+      m.title,
+      m.count,
+      m.items,
+      m.amiibo,
+      m.file && [m.file.name, m.file.path, m.file.size, m.file.notes, m.file.status],
+      (m.series || []).map((s) => s.join(':')),
+      m.games == null ? null : m.games.length,
+      (m.actions || []).map((a) => a.act + a.disabled),
+      settings.online,
+      db.ready,
+    ]);
+    if (key === lastInfoKey) return;
+    lastInfoKey = key;
+    el.infoBody.innerHTML = AUI.panelHtml(m, { online: settings.online, fmtSize });
+    el.infoBody.scrollTop = 0;
+    if (m.kind === 'amiibo') {
+      const box = el.infoBody.querySelector('.ip-games');
+      if (!settings.online) {
+        if (box) box.innerHTML = '<p class="ip-muted">Turn on amiibo names and pictures in Settings to see which games this amiibo works with.</p>';
+      } else if (m.games == null) {
+        db.loadGames()
+          .then(() => {
+            lastInfoKey = '';
+            scheduleInfo();
+          })
+          .catch((e) => {
+            const b = el.infoBody.querySelector('.ip-games');
+            if (b) b.innerHTML = `<p class="ip-muted">Couldn’t load the game list (${esc(e.message)}).</p>`;
+          });
+      }
+    }
   }
 
   function rowHtml(it, cutSet, dupes) {
@@ -997,6 +1145,7 @@
     el.checkAll.checked = total > 0 && n === total;
     el.checkAll.indeterminate = n > 0 && n < total;
     el.checkAll.disabled = !total;
+    scheduleInfo();
     updateActions();
     renderStatus();
   }
@@ -1026,6 +1175,7 @@
       'upload-files': !on,
       'new-folder': !on,
       sync: !on,
+      organize: !on || !S.items.length,
       download: !on || !n,
       copy: !on || !n,
       cut: !on || !n,
@@ -2098,6 +2248,217 @@
     queueZip(root, items, `Pixl ${label}-drive backup ${date}.zip`);
   }
 
+  /* ------------------------------------------------------------- organize */
+
+  function organizeOpts() {
+    return { group: settings.group || 'series', naming: settings.naming || 'name' };
+  }
+
+  /** The folder amiibo live in on a drive, e.g. "E:/amiibo". */
+  function amiiboRoot(drive) {
+    const name = (settings.amiiboRoot || '').replace(/^[\\/]+|[\\/]+$/g, '');
+    const root = PP.root(drive || (S.cwd ? PP.drive(S.cwd) : (S.drives.find((d) => d.ok) || { label: 'E' }).label));
+    return name ? PP.join(root, name) : root;
+  }
+
+  /** Tidies amiibo into <folder>/<Series>/<Name>.bin. Scope: selection, or the current folder. */
+  function organize(scope) {
+    if (!S.cwd) return;
+    const dir = S.cwd;
+    const root = PP.isRoot(dir) ? amiiboRoot(PP.drive(dir)) : dir;
+    const picked = scope && scope.length ? scope : S.items.slice();
+    addJob({
+      kind: 'scan',
+      icon: 'sparkle',
+      title: `Plan organizing ${picked === S.items || !scope || !scope.length ? dir : plural(picked.length, 'item')}`,
+      detail: 'Scanning',
+      doneText: 'Plan ready',
+      run: async (job) => {
+        const sig = { signal: job.ctrl.signal };
+        const files = [];
+        const scopeDirs = [];
+        // dirs: collects folders only while walking the chosen scope (candidates for "remove if empty")
+        async function walk(d, into, dirs) {
+          if (job.ctrl.signal.aborted) throw P.abortError();
+          setPhase(job, `Scanning ${d}`);
+          const items = await withRetry(() => S.client.listDir(d), retryOpts('Open folder', sig));
+          for (const it of items) {
+            const p = PP.join(d, it.name);
+            if (it.isDir) {
+              if (dirs) dirs.push(p);
+              await walk(p, into, dirs);
+            } else into.push({ path: p, size: it.size, meta: it.meta, name: it.name });
+          }
+        }
+        for (const it of picked) {
+          const p = PP.join(dir, it.name);
+          if (it.isDir) {
+            scopeDirs.push(p);
+            await walk(p, files, scopeDirs);
+          } else files.push({ path: p, size: it.size, meta: it.meta, name: it.name });
+        }
+        // everything that already exists under the target root, so new names never clash
+        const occupied = files.map((f) => f.path);
+        const existing = [];
+        await walk(root, existing, null).catch(() => {}); // the root may not exist yet
+        existing.forEach((f) => occupied.push(f.path));
+        const cands = files.filter((f) => AM.AMIIBO_SIZES.indexOf(f.size) >= 0);
+        let i = 0;
+        for (const f of cands) {
+          f.id = AM.idFromMeta(f.meta) || idCache.get(f.path, f.size);
+          if (f.id === undefined) {
+            if (job.ctrl.signal.aborted) throw P.abortError();
+            setPhase(job, `Identifying ${++i}: ${PP.basename(f.path)}`);
+            const data = await readVerified(f.path, f.size, null, retryOpts('Read', sig));
+            f.id = AM.idFromDump(data);
+            idCache.set(f.path, f.size, f.id);
+          }
+          f.info = f.id ? db.lookup(f.id) : null;
+        }
+        job.result = { dir, root, files: cands, others: files.length - cands.length, occupied, scopeDirs };
+      },
+      after: async function () {
+        await reviewOrganize(this.result);
+      },
+    });
+  }
+
+  async function reviewOrganize(r) {
+    if (!r) return;
+    if (!db.ready) {
+      toast('Amiibo names aren’t loaded yet (turn on online lookups in Settings), so files can’t be organized by series.', 'error');
+      return;
+    }
+    let opts = organizeOpts();
+    let removeEmpty = true;
+    let plan = P.organize.place(r.files, r.occupied, r.root, opts);
+    const rel = (p) => (p.startsWith(r.root + '/') ? p.slice(r.root.length + 1) : p);
+    const body = () => {
+      const rows = plan.moves
+        .slice(0, 300)
+        .map(
+          (m) => `<li class="rv-row"><span class="fi fi-art">${AUI.art(m.item.info, { online: settings.online })}</span>
+          <div class="rv-main"><div class="rv-title">${esc(rel(m.to))}</div><div class="rv-file">from ${esc(m.item.path)}</div></div></li>`
+        )
+        .join('');
+      const summary = [
+        plan.moves.length ? `${plan.moves.length} to move or rename` : 'Nothing to move',
+        plan.inPlace.length ? `${plan.inPlace.length} already in place` : '',
+        plan.unknown.length ? `${plan.unknown.length} not identified (left alone)` : '',
+        r.others ? `${plural(r.others, 'other file')} left alone` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      return `<p class="muted-line">${esc(summary)}</p>${rows ? `<ul class="review-list">${rows}</ul>` : ''}`;
+    };
+    const res = await modal({
+      title: 'Organize amiibo',
+      icon: 'sparkle',
+      wide: true,
+      body: `<p>Files go into <b>${esc(r.root)}/</b><span id="orgPattern"></span></p>
+        <div class="org-opts">
+          <label class="field"><span>Folders by</span><select id="orgGroup">
+            <option value="series">Amiibo series (set)</option><option value="game">Game</option><option value="none">No folders</option></select></label>
+          <label class="field"><span>File names</span><select id="orgNaming">
+            <option value="name">Amiibo name, e.g. Mario.bin</option><option value="keep">Keep current names</option></select></label>
+        </div>
+        <div id="orgBody"></div>
+        <label class="check-row"><input type="checkbox" id="orgEmpty" checked><span>Remove folders that end up empty</span></label>`,
+      actions: [
+        { label: 'Cancel', value: null },
+        { label: 'Organize', kind: 'primary', submit: true, value: () => (plan.moves.length ? { plan, opts, removeEmpty } : null) },
+      ],
+      init(d) {
+        const g = d.querySelector('#orgGroup');
+        const n = d.querySelector('#orgNaming');
+        const out = d.querySelector('#orgBody');
+        const pat = d.querySelector('#orgPattern');
+        const btn = d.querySelector('.dlg-foot .btn.primary');
+        g.value = opts.group;
+        n.value = opts.naming;
+        const upd = () => {
+          opts = { group: g.value, naming: n.value };
+          plan = P.organize.place(r.files, r.occupied, r.root, opts);
+          pat.textContent = `${opts.group === 'none' ? '' : opts.group === 'game' ? '<Game>/' : '<Series>/'}${opts.naming === 'name' ? '<Amiibo name>.bin' : '<current name>'}`;
+          out.innerHTML = body();
+          btn.textContent = plan.moves.length ? `Organize ${plural(plan.moves.length, 'file')}` : 'Nothing to do';
+          btn.disabled = !plan.moves.length;
+        };
+        g.onchange = n.onchange = upd;
+        d.querySelector('#orgEmpty').onchange = (e) => (removeEmpty = e.target.checked);
+        upd();
+      },
+    });
+    if (!res) return;
+    settings.group = res.opts.group;
+    settings.naming = res.opts.naming;
+    saveSettings();
+    const moves = res.plan.moves;
+    addJob({
+      kind: 'move',
+      icon: 'sparkle',
+      title: `Organize ${plural(moves.length, 'amiibo', 'amiibo')}`,
+      detail: 'into ' + r.root,
+      doneText: `Organized into ${r.root}`,
+      affects: r.dir,
+      run: async (job) => {
+        const sig = { signal: job.ctrl.signal };
+        const made = new Set();
+        const ensureChain = async (d) => {
+          const parts = [];
+          for (let p = d; !PP.isRoot(p) && !made.has(p); p = PP.parent(p)) parts.unshift(p);
+          for (const p of parts) {
+            await withRetry(() => ensureDir(p), retryOpts('Create folder', sig));
+            made.add(p);
+          }
+        };
+        let i = 0;
+        for (const m of moves) {
+          if (job.ctrl.signal.aborted) throw P.abortError();
+          setPhase(job, `${PP.basename(m.item.path)} → ${m.to.slice(r.root.length + 1)}`);
+          await ensureChain(PP.parent(m.to));
+          await renameSafe(m.item.path, m.to, retryOpts('Move', sig));
+          idCache.move(m.item.path, m.to, m.item.size);
+          setProgress(job, ++i, moves.length + 1);
+        }
+        if (res.removeEmpty) {
+          // only folders that files were moved out of (never ones that were already empty)
+          const touched = new Set();
+          moves.forEach((m) => {
+            for (let p = PP.parent(m.item.path); p.length > r.dir.length && !PP.isRoot(p); p = PP.parent(p)) touched.add(p);
+          });
+          const dirs = r.scopeDirs.filter((d) => touched.has(d)).sort((a, b) => b.length - a.length);
+          for (const d of dirs) {
+            if (made.has(d)) continue;
+            const left = await S.client.listDir(d).catch(() => null);
+            if (left && !left.length) await removeSafe(d, retryOpts('Delete', sig)).catch(() => {});
+            setProgress(job, ++i);
+          }
+        }
+      },
+    });
+  }
+
+  /* ----------------------------------------------------------------- modes */
+
+  function setMode(mode) {
+    if (mode === 'library' && !P.libraryUI) return;
+    if (mode === 'library' && S.conn !== 'on') return;
+    S.mode = mode;
+    el.app.dataset.mode = mode;
+    el.modeTabs.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('active', b.dataset.mode === mode));
+    el.library.hidden = mode !== 'library';
+    infoOverride = null;
+    lastInfoKey = '';
+    hideMenu();
+    if (mode === 'library') P.libraryUI.show(ctx);
+    else if (P.libraryUI) {
+      P.libraryUI.hide();
+      if (S.cwd && S.conn === 'on') refresh();
+    }
+    scheduleInfo();
+  }
+
   /* -------------------------------------------------------- copy/move/paste */
 
   function setClipboard(mode) {
@@ -2522,6 +2883,7 @@
     'restore-zip': () => el.zipInput.click(),
     'new-folder': newFolder,
     sync: () => (P.syncUI ? P.syncUI.open(ctx) : toast('Folder sync isn’t available', 'error')),
+    organize: () => organize(selectedItems()),
     download: () => download(selectedItems()),
     copy: () => setClipboard('copy'),
     cut: () => setClipboard('cut'),
@@ -2547,6 +2909,7 @@
       '-',
       { label: 'Rename', icon: 'rename', kbd: 'F2', disabled: multi, act: actions.rename },
       { label: 'Properties', icon: 'info', kbd: 'Alt+Enter', disabled: multi, act: actions.props },
+      { label: 'Organize into series folders…', icon: 'sparkle', act: actions.organize },
       '-',
       { label: multi ? `Delete ${sel.length} items` : 'Delete', icon: 'trash', kbd: 'Del', danger: true, act: actions.delete },
     ].filter(Boolean));
@@ -2560,6 +2923,7 @@
       { label: 'New folder', icon: 'folder-plus', kbd: 'Ctrl+Shift+N', act: actions['new-folder'] },
       '-',
       { label: 'Paste', icon: 'paste', kbd: 'Ctrl+V', disabled: !S.clipboard, act: actions.paste },
+      { label: 'Organize this folder…', icon: 'sparkle', disabled: !S.items.length, act: () => organize([]) },
       { label: 'Find duplicate amiibo here', icon: 'dupe', act: () => findDuplicates(S.cwd) },
       { label: 'Refresh', icon: 'refresh', kbd: 'F5', act: () => refresh() },
       { label: 'Select all', icon: 'check', kbd: 'Ctrl+A', disabled: !S.view.length, act: selectAll },
@@ -2588,6 +2952,18 @@
           <span>Verify uploads<small>Read every uploaded or copied file back and compare it byte for byte.</small></span></label>
         <label class="check-row"><input type="checkbox" id="stFast" ${settings.fast ? 'checked' : ''}>
           <span>Fast transfers (experimental)<small>Sends several packets before waiting for the device to confirm. Faster for big files; turns itself off if the device can’t keep up. Keep “Verify uploads” on while trying it.</small></span></label>
+        <div class="settings-h">Organizing amiibo</div>
+        <div class="org-opts">
+          <label class="field"><span>Amiibo folder on the Pixl.js</span><input type="text" id="stRoot" value="${esc(settings.amiiboRoot || '')}" placeholder="amiibo" spellcheck="false" autocomplete="off"></label>
+          <label class="field"><span>Folders by</span><select id="stGroup">
+            <option value="series" ${settings.group === 'series' ? 'selected' : ''}>Amiibo series (set)</option>
+            <option value="game" ${settings.group === 'game' ? 'selected' : ''}>Game</option>
+            <option value="none" ${settings.group === 'none' ? 'selected' : ''}>No folders</option></select></label>
+          <label class="field"><span>File names</span><select id="stNaming">
+            <option value="name" ${settings.naming !== 'keep' ? 'selected' : ''}>Amiibo name</option>
+            <option value="keep" ${settings.naming === 'keep' ? 'selected' : ''}>Keep current names</option></select></label>
+        </div>
+        <p class="muted-line">Used by Organize and by Send in the amiibo library, e.g. <b>amiibo/Super Smash Bros./Mario.bin</b>.</p>
         <div class="settings-actions">
           <button type="button" class="btn sm" id="stRefreshDb">${icon('refresh')}<span>Update amiibo name list</span></button>
           <button type="button" class="btn sm" id="stClearCache">${icon('erase')}<span>Forget identified files</span></button>
@@ -2599,11 +2975,19 @@
           label: 'Save',
           kind: 'primary',
           submit: true,
-          value: () => ({ online: f.online.checked, review: f.review.checked, verify: f.verify.checked, fast: f.fast.checked }),
+          value: () => ({
+            online: f.online.checked,
+            review: f.review.checked,
+            verify: f.verify.checked,
+            fast: f.fast.checked,
+            root: f.root.value.trim().replace(/^[\\/]+|[\\/]+$/g, ''),
+            group: f.group.value,
+            naming: f.naming.value,
+          }),
         },
       ],
       init(d) {
-        ['online', 'review', 'verify', 'fast'].forEach((k) => (f[k] = d.querySelector('#st' + k[0].toUpperCase() + k.slice(1))));
+        ['online', 'review', 'verify', 'fast', 'root', 'group', 'naming'].forEach((k) => (f[k] = d.querySelector('#st' + k[0].toUpperCase() + k.slice(1))));
         const info = d.querySelector('#stDbInfo');
         const showInfo = () => {
           info.textContent = db.ready
@@ -2634,7 +3018,12 @@
     settings.online = res.online;
     settings.reviewUploads = res.review;
     settings.fast = res.fast;
+    if (!res.root || !PP.validateName(res.root.split('/').pop())) settings.amiiboRoot = res.root;
+    settings.group = res.group;
+    settings.naming = res.naming;
     saveSettings();
+    lastInfoKey = '';
+    scheduleInfo();
     el.verifyChk.checked = res.verify;
     store.set('verify', res.verify);
     applyClientSettings();
@@ -2762,6 +3151,20 @@
       if (b) setView(b.dataset.view);
     });
     el.settingsBtn.addEventListener('click', openSettings);
+    el.infoToggle.addEventListener('click', () => toggleInfo());
+    el.infoClose.addEventListener('click', () => toggleInfo(false));
+    el.modeTabs.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-mode]');
+      if (b && b.dataset.mode !== S.mode) setMode(b.dataset.mode);
+    });
+    el.infoBody.addEventListener('click', (ev) => {
+      const b = ev.target.closest('[data-ip-act]');
+      if (!b || b.disabled) return;
+      const act = b.dataset.ipAct;
+      if (S.mode === 'library' && P.libraryUI) return P.libraryUI.panelAction(act);
+      if (act === 'open') return openItem(selectedItems()[0]);
+      if (actions[act]) actions[act]();
+    });
     const openFirmware = () => (P.firmwareUI ? P.firmwareUI.open(ctx) : toast('Firmware update isn’t available', 'error'));
     el.sideFirmware.addEventListener('click', openFirmware);
     el.welcomeFirmware.addEventListener('click', openFirmware);
@@ -3016,6 +3419,9 @@
     } else if (ev.altKey && k === 'ArrowRight') {
       ev.preventDefault();
       goFwd();
+    } else if (k === 'i' && !mod && !ev.altKey) {
+      ev.preventDefault();
+      toggleInfo();
     } else if (k === 'Escape' && S.sel.size) {
       S.sel.clear();
       renderSelection();
@@ -3187,6 +3593,17 @@
     connect,
     userDisconnect,
     idCache,
+    db,
+    AUI,
+    store,
+    setInfo,
+    setMode,
+    amiiboRoot,
+    organizeOpts,
+    renameSafe,
+    listingFor,
+    saveBlob,
+    isAmiiboCandidate,
     get verify() {
       return el.verifyChk.checked;
     },
@@ -3225,8 +3642,14 @@
       const b = el.actions.querySelector('[data-act="sync"]');
       if (b) b.hidden = true;
     }
-    db.onChange(() => scheduleListRender());
+    db.onChange(() => {
+      scheduleListRender();
+      lastInfoKey = '';
+      scheduleInfo();
+      if (P.libraryUI) P.libraryUI.refreshView();
+    });
     db.load(settings.online);
+    applyInfoVisibility();
     log('info', P.BleTransport.supported() ? 'Ready. Web Bluetooth is available.' : 'Ready. Web Bluetooth is not available in this browser (demo still works).');
     if (params.has('demo')) connect(true);
   }

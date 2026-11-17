@@ -14,6 +14,7 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='3' y='2' width='18' height='20' rx='4' fill='%234f46e5'/%3E%3Crect x='6.5' y='5.5' width='11' height='8' rx='1.5' fill='white'/%3E%3Ccircle cx='12' cy='17.5' r='1.8' fill='white'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="css/app.css" />
+    <link rel="stylesheet" href="css/amiibo.css" />
   </head>
   <body>
     <svg width="0" height="0" style="position: absolute" aria-hidden="true">
@@ -61,6 +62,11 @@
         <symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" /><rect x="9.5" y="9.5" width="5" height="5" rx=".8" /><path d="M9 2.5V6M15 2.5V6M9 18v3.5M15 18v3.5M2.5 9H6M2.5 15H6M18 9h3.5M18 15h3.5" /></symbol>
         <symbol id="i-dupe" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="12" height="12" rx="2.2" /><path d="M15.5 8.5V6A2.5 2.5 0 0 0 13 3.5H6A2.5 2.5 0 0 0 3.5 6v7A2.5 2.5 0 0 0 6 15.5h2.5" /><path d="M12 14.5h5M14.5 12v5" /></symbol>
         <symbol id="i-archive-in" viewBox="0 0 24 24"><rect x="3" y="3.5" width="18" height="5" rx="1.5" /><path d="M5 8.5v10A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5v-10" /><path d="M12 11v6.5M9.5 14l2.5-2.5 2.5 2.5" /></symbol>
+        <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5" /><path d="M15 4v16" /><path d="M17.5 8h1M17.5 11h1" /></symbol>
+        <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.1 5.1 1.9-5.1 1.9L12 17.5l-1.9-5.1L5 10.5l5.1-1.9z" /><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z" /></symbol>
+        <symbol id="i-books" viewBox="0 0 24 24"><rect x="3.5" y="4" width="4.5" height="16" rx="1" /><rect x="9" y="4" width="4.5" height="16" rx="1" /><path d="M15.2 5.3l3.9-1.1 3.4 15.3-3.9 1.1z" /></symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12h14" /><path d="m12.5 5.5 6.5 6.5-6.5 6.5" /></symbol>
+        <symbol id="i-save" viewBox="0 0 24 24"><path d="M20 12H6" /><path d="m11.5 5.5-6.5 6.5 6.5 6.5" /></symbol>
         <symbol id="i-erase" viewBox="0 0 24 24"><path d="M7 21h12" /><path d="M5.3 15.7 14.6 6.4a2 2 0 0 1 2.8 0l2.2 2.2a2 2 0 0 1 0 2.8L11 20H8.3a2 2 0 0 1-1.4-.6l-1.6-1.6a1.5 1.5 0 0 1 0-2.1z" /><path d="m10 11 5 5" /></symbol>
       </defs>
     </svg>
@@ -74,6 +80,10 @@
         <div class="conn-pill" id="connPill" aria-live="polite">
           <span class="dot"></span><span id="connText">Not connected</span>
         </div>
+        <nav class="mode-tabs" id="modeTabs" role="tablist" aria-label="View" hidden>
+          <button role="tab" data-mode="files" class="active"><svg class="ic"><use href="#i-folder" /></svg><span>Files</span></button>
+          <button role="tab" data-mode="library"><svg class="ic"><use href="#i-books" /></svg><span>Amiibo library</span></button>
+        </nav>
         <div class="spacer"></div>
         <button class="btn sm" id="installBtn" title="Install as an app on this computer" hidden>
           <svg class="ic"><use href="#i-download" /></svg><span>Install app</span>
@@ -158,6 +168,7 @@
               <button class="btn ghost icon" data-view="list" title="List view" aria-label="List view"><svg class="ic"><use href="#i-list" /></svg></button>
               <button class="btn ghost icon" data-view="grid" title="Picture grid" aria-label="Picture grid"><svg class="ic"><use href="#i-grid" /></svg></button>
             </div>
+            <button class="btn ghost icon" id="infoToggle" title="Details panel (I)" aria-label="Show or hide the details panel"><svg class="ic"><use href="#i-panel" /></svg></button>
           </div>
 
           <div class="mobile-drives" id="mobileDrives"></div>
@@ -175,6 +186,7 @@
             <span class="sep"></span>
             <button class="btn sm" data-act="download" title="Download to this computer"><svg class="ic"><use href="#i-download" /></svg><span>Download</span></button>
             <button class="btn sm" data-act="sync" title="Sync this folder with a folder on your PC"><svg class="ic"><use href="#i-sync" /></svg><span>Sync</span></button>
+            <button class="btn sm" data-act="organize" title="Sort amiibo into series folders and name them"><svg class="ic"><use href="#i-sparkle" /></svg><span>Organize</span></button>
             <button class="btn sm compact" data-act="copy" title="Copy (Ctrl+C)"><svg class="ic"><use href="#i-copy" /></svg><span>Copy</span></button>
             <button class="btn sm compact" data-act="cut" title="Cut (Ctrl+X)"><svg class="ic"><use href="#i-cut" /></svg><span>Cut</span></button>
             <button class="btn sm compact" data-act="paste" title="Paste (Ctrl+V)"><svg class="ic"><use href="#i-paste" /></svg><span>Paste</span></button>
@@ -202,7 +214,13 @@
             <span class="spacer"></span>
             <span id="statusRight"></span>
           </div>
+          <section class="library" id="library" hidden></section>
         </main>
+
+        <aside class="info-panel" id="infoPanel" aria-label="Details">
+          <button class="btn ghost icon sm ip-close" id="infoClose" title="Hide details (I)" aria-label="Hide details"><svg class="ic"><use href="#i-x" /></svg></button>
+          <div class="ip-scroll" id="infoBody"></div>
+        </aside>
       </div>
 
       <section class="panel" id="panel" data-open="false">
@@ -250,6 +268,9 @@
     <script src="js/zip.js"></script>
     <script src="js/unzip.js"></script>
     <script src="js/amiibo.js"></script>
+    <script src="js/organize.js"></script>
+    <script src="js/amiibo-ui.js"></script>
+    <script src="js/library.js"></script>
     <script src="js/dfu.js"></script>
     <script src="js/mock-dfu.js"></script>
     <script src="js/sync.js"></script>

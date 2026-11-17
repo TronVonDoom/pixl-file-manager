@@ -10,7 +10,7 @@ globalThis.window = globalThis;
 const root = path.join(__dirname, '..');
 const load = (rel) => vm.runInThisContext(fs.readFileSync(path.join(root, rel), 'utf8'), { filename: rel });
 
-['js/protocol.js', 'js/mock-device.js', 'js/zip.js', 'js/unzip.js', 'js/amiibo.js', 'js/dfu.js', 'js/mock-dfu.js', 'js/sync.js', 'tests/harness.js', 'tests/suite.js'].forEach(load);
+['js/protocol.js', 'js/mock-device.js', 'js/zip.js', 'js/unzip.js', 'js/amiibo.js', 'js/organize.js', 'js/dfu.js', 'js/mock-dfu.js', 'js/sync.js', 'tests/harness.js', 'tests/suite.js'].forEach(load);
 
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
 const red = (s) => `\x1b[31m${s}\x1b[0m`;
